@@ -6,6 +6,8 @@ for welcome messages. Invite with the `bot` and `applications.commands`
 scopes so slash commands show up.
 """
 import os
+import re
+import time
 from datetime import timedelta
 
 import discord
@@ -20,6 +22,10 @@ intents = discord.Intents.default()
 # portal (Bot page -> Privileged Gateway Intents). Flip the toggle there
 # and set this True to enable welcome messages.
 intents.members = False
+# NOTE: Message Content Intent must be ON in the developer portal
+# (Bot page -> Privileged Gateway Intents) for the no-swearing filter
+# to see message text. Flip the toggle there.
+intents.message_content = True
 
 
 def _install_lenient_websocket_handshake() -> None:
@@ -371,6 +377,45 @@ async def on_app_command_error(
             await interaction.response.send_message(msg, ephemeral=True)
     except discord.HTTPException:
         pass
+
+
+# No-swearing rule: if a message contains profanity, the bot replies
+# "Please do not swear." One warning per user per minute so it can't
+# be used to spam the channel.
+_PROFANITY = re.compile(
+    r"\b("
+    r"fuck(?:er|ing|ed|s)?|motherfucker|"
+    r"shit(?:ty|ting|s)?|bullshit|"
+    r"bitch(?:es|ing)?|"
+    r"ass(?:hole|es)?|"
+    r"dick(?:head|s)?|"
+    r"bastard|damn|hell|"
+    r"cunt|whore|slut|twat|"
+    r"pussy|cock|tits|"
+    r"douche(?:bag)?|"
+    r"piss(?:ed|ing)?|crap|"
+    r"fag(?:got)?|nigga|nigger|retard|"
+    r"wanker|bollocks"
+    r")\b",
+    re.IGNORECASE,
+)
+_swear_warned_at: dict[int, float] = {}
+_SWEAR_COOLDOWN_S = 60.0
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.guild is not None and not message.author.bot:
+        if _PROFANITY.search(message.content or ""):
+            now = time.monotonic()
+            last = _swear_warned_at.get(message.author.id, 0.0)
+            if now - last >= _SWEAR_COOLDOWN_S:
+                _swear_warned_at[message.author.id] = now
+                try:
+                    await message.reply("Please do not swear.", mention_author=True)
+                except discord.HTTPException:
+                    pass
+    await bot.process_commands(message)
 
 
 if __name__ == "__main__":
