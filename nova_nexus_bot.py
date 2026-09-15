@@ -7,6 +7,7 @@ scopes so slash commands show up.
 """
 import asyncio
 import io
+import json
 import os
 import re
 import time
@@ -308,6 +309,16 @@ async def help_cmd(interaction: discord.Interaction):
     embed.add_field(
         name="/ticket setup",
         value="Create the ticket center (mods only).",
+        inline=False,
+    )
+    embed.add_field(
+        name="/announce setup",
+        value="Create the announcements channel for engine updates (mods only).",
+        inline=False,
+    )
+    embed.add_field(
+        name="Chat with me",
+        value="Mention me or reply to me in any channel and I'll answer engine questions.",
         inline=False,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -783,6 +794,259 @@ async def ticket_setup_cmd(interaction: discord.Interaction):
 
 bot.tree.add_command(ticket_group)
 
+# --- Engine announcements -------------------------------------------------
+# /announce setup (mods) creates an #announcements channel plus an
+# "Engine Updates" webhook in it, then wires the Nova-Nexus-3 repo to post
+# there on every push to main: it stores the webhook URL as the
+# DISCORD_ANNOUNCE_WEBHOOK Actions secret and opens a PR adding
+# .github/workflows/announce.yml. The webhook posts straight to Discord,
+# so announcements land even while the bot itself is offline.
+
+_ANNOUNCE_CHANNEL = "announcements"
+_ENGINE_REPO_OWNER = "howarthjakob4-prog"
+_ENGINE_REPO = "Nova-Nexus-3"
+_ANNOUNCE_SECRET_NAME = "DISCORD_ANNOUNCE_WEBHOOK"
+_ANNOUNCE_WORKFLOW_BRANCH = "feature/engine-announce-webhook"
+_ANNOUNCE_WORKFLOW_PATH = ".github/workflows/announce.yml"
+
+_ANNOUNCE_WORKFLOW_YAML = """name: Engine announcements
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post the update to Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_ANNOUNCE_WEBHOOK }}
+          HEAD_COMMIT: ${{ toJSON(github.event.head_commit) }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, urllib.request
+          webhook = os.environ["DISCORD_WEBHOOK"]
+          head = json.loads(os.environ["HEAD_COMMIT"])  # JSON text, not a Python literal
+          summary = (head.get("message") or "").split("\\n")[0][:256]
+          embed = {
+              "title": "⚙️ Nova Nexus 3 engine updated",
+              "description": summary or "A new change was pushed.",
+              "url": head.get("url"),
+              "color": 0x14B8A6,
+              "fields": [
+                  {"name": "By", "value": os.environ["ACTOR"], "inline": True},
+                  {
+                      "name": "Commit",
+                      "value": (head.get("id") or "")[:7] or "—",
+                      "inline": True,
+                  },
+              ],
+          }
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps({"embeds": [embed]}).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          urllib.request.urlopen(req)
+          print("announced", (head.get("id") or "")[:7])
+          PYEOF
+"""
+
+
+def _github_api(method, path, token, payload=None):
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        "https://api.github.com" + path,
+        data=data,
+        method=method,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "nova-nexus-3-discord-bot",
+        },
+    )
+    with urllib.request.urlopen(req) as resp:
+        body = resp.read().decode()
+        return json.loads(body) if body else {}
+
+
+def _wire_engine_announcements(webhook_url: str) -> str:
+    """Store the webhook as a repo secret and open the workflow PR.
+
+    Returns the PR URL. Raises RuntimeError with a short message on failure.
+    """
+    token = _RULES_TOKEN
+    if not token:
+        raise RuntimeError("no GitHub token available")
+    repo = f"/repos/{_ENGINE_REPO_OWNER}/{_ENGINE_REPO}"
+    try:
+        # 1. Save the webhook URL as an Actions secret (sealed-box encrypted).
+        import base64 as _b64
+
+        from nacl.public import PublicKey, SealedBox
+
+        pub = _github_api("GET", repo + "/actions/secrets/public-key", token)
+        sealed = SealedBox(PublicKey(_b64.b64decode(pub["key"])))
+        encrypted = _b64.b64encode(sealed.encrypt(webhook_url.encode())).decode()
+        _github_api(
+            "PUT",
+            repo + "/actions/secrets/" + _ANNOUNCE_SECRET_NAME,
+            token,
+            {"encrypted_value": encrypted, "key_id": pub["key_id"]},
+        )
+        # 2. Branch off main and add the workflow file.
+        main_ref = _github_api("GET", repo + "/git/ref/heads/main", token)
+        main_sha = main_ref["object"]["sha"]
+        try:
+            _github_api(
+                "POST",
+                repo + "/git/refs",
+                token,
+                {"ref": "refs/heads/" + _ANNOUNCE_WORKFLOW_BRANCH, "sha": main_sha},
+            )
+        except urllib.error.HTTPError as e:
+            if e.code != 422:  # 422 = branch already exists; reuse it
+                raise
+        # Reruns must update the existing file: GitHub requires its blob SHA.
+        file_payload = {
+            "message": "Post engine updates to the Discord announcements channel",
+            "content": _b64.b64encode(_ANNOUNCE_WORKFLOW_YAML.encode()).decode(),
+            "branch": _ANNOUNCE_WORKFLOW_BRANCH,
+        }
+        try:
+            existing = _github_api(
+                "GET",
+                repo + "/contents/" + _ANNOUNCE_WORKFLOW_PATH
+                + "?ref=" + _ANNOUNCE_WORKFLOW_BRANCH,
+                token,
+            )
+            if isinstance(existing, dict) and existing.get("sha"):
+                file_payload["sha"] = existing["sha"]
+        except urllib.error.HTTPError as e:
+            if e.code != 404:  # 404 = first run, nothing to update
+                raise
+        _github_api(
+            "PUT",
+            repo + "/contents/" + _ANNOUNCE_WORKFLOW_PATH,
+            token,
+            file_payload,
+        )
+        # 3. Open the PR.
+        pr = _github_api(
+            "POST",
+            repo + "/pulls",
+            token,
+            {
+                "title": "Announce engine updates in Discord",
+                "head": _ANNOUNCE_WORKFLOW_BRANCH,
+                "base": "main",
+                "body": (
+                    "Posts a message to the #announcements channel "
+                    "(via the `DISCORD_ANNOUNCE_WEBHOOK` secret) on every push "
+                    "to `main`.\n\nMerge this to turn engine update "
+                    "announcements on."
+                ),
+            },
+        )
+        return pr["html_url"]
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise RuntimeError(
+                "GitHub token was rejected (HTTP %d) — it needs the 'repo' "
+                "scope to wire up announcements." % e.code
+            )
+        raise RuntimeError(f"GitHub API error {e.code}")
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(str(e))
+
+
+announce_group = app_commands.Group(
+    name="announce", description="Engine announcements."
+)
+
+
+@announce_group.command(
+    name="setup", description="Create the announcements channel (mods only)."
+)
+@_manage_server()
+async def announce_setup_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if guild is None:
+        await interaction.followup.send("Run this inside the server.", ephemeral=True)
+        return
+    me = guild.me
+    if me is None or not (
+        me.guild_permissions.manage_channels and me.guild_permissions.manage_webhooks
+    ):
+        await interaction.followup.send(
+            'I need the "Manage Channels" and "Manage Webhooks" permissions '
+            "to set up announcements. Give the bot those permissions and run "
+            "/announce setup again.",
+            ephemeral=True,
+        )
+        return
+    channel = discord.utils.get(guild.text_channels, name=_ANNOUNCE_CHANNEL)
+    try:
+        if channel is None:
+            channel = await guild.create_text_channel(
+                _ANNOUNCE_CHANNEL,
+                topic="Nova Nexus 3 engine updates.",
+                reason="Announcements setup",
+            )
+        webhook = discord.utils.get(await channel.webhooks(), name="Engine Updates")
+        if webhook is None:
+            webhook = await channel.create_webhook(
+                name="Engine Updates", reason="Announcements setup"
+            )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            'I need the "Manage Channels" and "Manage Webhooks" permissions '
+            "to set up announcements. Give the bot those permissions and run "
+            "/announce setup again.",
+            ephemeral=True,
+        )
+        return
+    try:
+        pr_url = await asyncio.to_thread(_wire_engine_announcements, webhook.url)
+        wired = True
+    except RuntimeError as e:
+        print(f"[nova-nexus] announce wiring failed: {e}")
+        wired = False
+    embed = discord.Embed(
+        title="📢 Announcements",
+        description=(
+            "This channel will post **Nova Nexus 3 engine updates** — "
+            "every change pushed to the engine lands here automatically."
+        ),
+        color=0x14B8A6,
+    )
+    try:
+        await channel.send(embed=embed)
+    except discord.HTTPException:
+        pass
+    if wired:
+        await interaction.followup.send(
+            f"Announcements are ready in {channel.mention}. I opened {pr_url} "
+            "in the engine repo — merge it and updates will post here automatically.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.followup.send(
+            f"{channel.mention} is created, but I couldn't wire up the engine "
+            "repo automatically. Create a webhook in the channel settings, "
+            "add its URL as the `DISCORD_ANNOUNCE_WEBHOOK` secret in the "
+            "Nova-Nexus-3 repo, and add a workflow that posts to it on push to main.",
+            ephemeral=True,
+        )
+
+
+bot.tree.add_command(announce_group)
+
 
 # --- Ticket auto-answer + takeover -------------------------------------------
 # Inside ticket channels the bot answers questions itself using the engine
@@ -966,6 +1230,39 @@ async def _handle_dm(message: discord.Message):
         pass
 
 
+_CHAT_COOLDOWN_S = 5.0
+_chat_answered_at: dict[int, float] = {}
+
+
+def _talking_to_bot(message: discord.Message) -> bool:
+    """True when the message mentions the bot or replies to it."""
+    if bot.user is None:
+        return False
+    if bot.user in message.mentions:
+        return True
+    ref = message.reference
+    return (
+        ref is not None
+        and isinstance(ref.resolved, discord.Message)
+        and ref.resolved.author == bot.user
+    )
+
+
+async def _handle_chat(message: discord.Message) -> None:
+    now = time.monotonic()
+    last = _chat_answered_at.get(message.author.id, 0.0)
+    if now - last < _CHAT_COOLDOWN_S:
+        return
+    _chat_answered_at[message.author.id] = now
+    content = re.sub(r"<@!?\d+>", "", message.content or "").strip()
+    if not content:
+        await message.reply(
+            "Hey — ask me something about the **Nova Nexus 3 engine**."
+        )
+        return
+    await message.reply(answer_question(content) or _ASK_FALLBACK)
+
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -988,6 +1285,8 @@ async def on_message(message: discord.Message):
                 pass
     elif _is_ticket_channel(message.channel):
         await _handle_ticket_message(message)
+    elif _talking_to_bot(message):
+        await _handle_chat(message)
     await bot.process_commands(message)
 
 
