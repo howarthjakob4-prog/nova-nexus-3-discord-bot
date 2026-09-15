@@ -319,7 +319,7 @@ async def rules_cmd(interaction: discord.Interaction):
                 discord.File(io.BytesIO(data.encode("utf-8")), filename=fname)
             )
     note = (
-        "\n\n**Project policies attached:** engine rules, "
+        "\n\n**Project policies attached:** "
         "Nova Nexus 3 license, Unreal license rules."
         if files
         else ""
@@ -332,7 +332,6 @@ _GITHUB_RAW = (
 )
 _RULES_TOKEN = os.environ.get("RULES_TOKEN")  # PAT with read access to Nova-Nexus-3
 _POLICY_FILES = (
-    "ENGINE_RULES.md",
     "NOVA_NEXUS_3_LICENSE.md",
     "EPIC_UNREAL_LICENSE_RULES.md",
 )
