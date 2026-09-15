@@ -4,16 +4,22 @@
 It only talks about the engine: `/ask` answers engine questions, plus
 `/help` `/engine` `/rules` `/links` and mod tools `/kick` `/ban` `/timeout`.
 
-## Run it on GitHub Actions (test hosting)
+## Run it on GitHub Actions (always-on)
+
+The repo is public, so Actions minutes are unlimited. A scheduled workflow
+starts a fresh bot run every 5 hours; each new run cleanly takes over from
+the previous one. A weekly keepalive commit keeps the schedule from expiring.
 
 1. Repo **Settings** → **Secrets and variables** → **Actions** →
    **New repository secret**. Name: `DISCORD_TOKEN`, value: your bot token
    from discord.com/developers/applications → your app → Bot.
    (The token is never committed to this repo.)
-2. **Actions** tab → **Nova Nexus 3 Engine Bot** → **Run workflow**.
+2. **Actions** tab → **Nova Nexus 3 Engine Bot** → **Run workflow** to start
+   the first run immediately. The schedule takes it from there.
 3. Watch the run log for `[nova-nexus] online as ...`.
 
-Each run lasts up to 6 hours (GitHub's cap). This is test hosting, not 24/7.
+Only one copy of the bot can be online per token — stop any other copies
+(PC, other hosts) before starting.
 
 ## Run it on your own machine
 
