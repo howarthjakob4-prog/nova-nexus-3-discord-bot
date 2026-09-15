@@ -426,7 +426,7 @@ async def _handle_dm(message: discord.Message):
             )
         else:
             await message.channel.send(
-                "I'm Dark Revan, the Nova Nexus 3 Engine bot. "
+                "I'm the Nova Nexus 3 Engine bot. "
                 "Ask me about the engine, or try /help."
             )
     except discord.HTTPException:
