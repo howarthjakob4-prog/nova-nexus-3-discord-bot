@@ -319,7 +319,7 @@ async def rules_cmd(interaction: discord.Interaction):
                 discord.File(io.BytesIO(data.encode("utf-8")), filename=fname)
             )
     note = (
-        "\n\n**Project policies attached:** engine rules, "
+        "\n\n**Project policies attached:** "
         "Nova Nexus 3 license, Unreal license rules."
         if files
         else ""
