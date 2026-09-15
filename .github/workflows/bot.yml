@@ -32,3 +32,4 @@ jobs:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           NOVA_RECONNECT: "0"
           GUILD_ID: "1547377379243204740"
+          RULES_TOKEN: ${{ secrets.RULES_TOKEN }}
