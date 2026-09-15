@@ -278,9 +278,8 @@ async def on_ready():
             f"?client_id={app_id}&permissions=8&scope=bot+applications.commands"
         )
         if (info.description or "") != bio and app_id:
-            route = discord.http.Route(
-                "PATCH", "/applications/{application_id}", application_id=app_id
-            )
+            # Bot tokens edit the current application via /applications/@me.
+            route = discord.http.Route("PATCH", "/applications/@me")
             await bot.http.request(route, json={"description": bio})
             print("[nova-nexus] profile bio updated")
     except Exception as e:  # noqa: BLE001
