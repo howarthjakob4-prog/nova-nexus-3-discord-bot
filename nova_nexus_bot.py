@@ -402,19 +402,52 @@ _PROFANITY = re.compile(
 _swear_warned_at: dict[int, float] = {}
 _SWEAR_COOLDOWN_S = 60.0
 
+_DM_GREETINGS = {"hi", "hello", "hey", "yo", "sup", "hiya", "howdy", "greetings"}
+_DM_MORNING = ("good morning", "good evening", "good afternoon")
+
+
+async def _handle_dm(message: discord.Message):
+    """Simple conversational replies in direct messages."""
+    text = (message.content or "").strip().lower()
+    if not text:
+        return
+    name = message.author.display_name
+    words = set(re.findall(r"[a-z']+", text))
+    try:
+        if words & _DM_GREETINGS or text.startswith(_DM_MORNING):
+            await message.channel.send(f"How can I help you, {name}?")
+        elif "thank" in text:
+            await message.channel.send("You're welcome!")
+        elif words & {"bye", "goodbye", "goodnight"} or "good night" in text:
+            await message.channel.send(f"Goodbye, {name}! Come back anytime.")
+        elif "help" in text:
+            await message.channel.send(
+                "Try /help to see what I can do, or ask me about the Nova Nexus 3 Engine."
+            )
+        else:
+            await message.channel.send(
+                "I'm the Nova Nexus 3 Engine bot. Ask me about the engine, or try /help."
+            )
+    except discord.HTTPException:
+        pass
+
 
 @bot.event
 async def on_message(message: discord.Message):
-    if message.guild is not None and not message.author.bot:
-        if _PROFANITY.search(message.content or ""):
-            now = time.monotonic()
-            last = _swear_warned_at.get(message.author.id, 0.0)
-            if now - last >= _SWEAR_COOLDOWN_S:
-                _swear_warned_at[message.author.id] = now
-                try:
-                    await message.reply("Please do not swear.", mention_author=True)
-                except discord.HTTPException:
-                    pass
+    if message.author.bot:
+        await bot.process_commands(message)
+        return
+    if message.guild is None:
+        await _handle_dm(message)
+    elif _PROFANITY.search(message.content or ""):
+        now = time.monotonic()
+        last = _swear_warned_at.get(message.author.id, 0.0)
+        if now - last >= _SWEAR_COOLDOWN_S:
+            _swear_warned_at[message.author.id] = now
+            try:
+                await message.reply("Please do not swear.", mention_author=True)
+            except discord.HTTPException:
+                pass
     await bot.process_commands(message)
 
 
