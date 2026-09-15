@@ -14,7 +14,7 @@ import urllib.request
 from datetime import timedelta
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -205,10 +205,25 @@ ENGINE_FAQ = [
         "Active work: the trailer studio's procedural models and cinematic FX. "
         "Ask the owner for the latest status.",
     ),
+    (
+        ("appeal",),
+        "To appeal a warning, timeout, kick, or ban, **DM a moderator directly** "
+        "— don't argue rulings in public channels.",
+    ),
+    (
+        ("report", "reporting"),
+        "To report a member, open a ticket with their username and a description "
+        "of what happened. Screenshots help.",
+    ),
+    (
+        ("role", "roles"),
+        "For server roles, ask a moderator — they handle role requests.",
+    ),
 ]
 
 
-def answer_question(question: str) -> str:
+def answer_question(question: str) -> str | None:
+    """Return the FAQ answer, or None when nothing matches."""
     q = question.lower()
     generic = {"what is", "about"}
     best, best_hits = None, 0
@@ -217,13 +232,14 @@ def answer_question(question: str) -> str:
         specific = sum(1 for kw in keywords if kw in q and kw not in generic)
         if hits > best_hits and specific >= 1:
             best, best_hits = answer, hits
-    if best:
-        return best
-    return (
-        "I only talk about the **Nova Nexus 3 engine**. Ask me something "
-        "about it — what it is, the Studio, the ships, the villain, "
-        "anything engine."
-    )
+    return best
+
+
+_ASK_FALLBACK = (
+    "I only talk about the **Nova Nexus 3 engine**. Ask me something "
+    "about it — what it is, the Studio, the ships, the villain, "
+    "anything engine."
+)
 
 
 @bot.event
@@ -289,6 +305,11 @@ async def help_cmd(interaction: discord.Interaction):
         value="Moderation (mods only).",
         inline=False,
     )
+    embed.add_field(
+        name="/ticket setup",
+        value="Create the ticket center (mods only).",
+        inline=False,
+    )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -304,7 +325,7 @@ async def engine_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name="ask", description="Ask anything about the Nova Nexus 3 engine.")
 async def ask_cmd(interaction: discord.Interaction, question: str):
-    await interaction.response.send_message(answer_question(question))
+    await interaction.response.send_message(answer_question(question) or _ASK_FALLBACK)
 
 
 @bot.tree.command(name="rules", description="Community rules.")
@@ -403,6 +424,477 @@ async def timeout_cmd(
     )
 
 
+# --- Ticket center -----------------------------------------------------------
+# /ticket setup (mods) auto-creates the ticket center: a "Tickets" category,
+# a #ticket-center channel with an "Open a Ticket" panel, and per-user
+# private ticket channels with a close flow. All buttons use static
+# custom_ids and are re-registered as persistent views on startup, so they
+# keep working across bot restarts. The bot needs the "Manage Channels"
+# permission in the server for setup to work.
+
+_TICKET_CATEGORY = "Tickets"
+_TICKET_PANEL_CHANNEL = "ticket-center"
+_TICKET_STAFF_ROLE_NAMES = ("moderator", "mod", "staff", "admin")
+
+
+def _manage_server():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        perms = interaction.user.guild_permissions if interaction.guild else None
+        return bool(perms and perms.manage_guild)
+
+    return app_commands.check(predicate)
+
+
+def _ticket_staff_roles(guild: discord.Guild) -> list:
+    named = [r for r in guild.roles if r.name.lower() in _TICKET_STAFF_ROLE_NAMES]
+    # Also cover staff whose powers come from role permissions rather than
+    # the role name (e.g. a "Helpers" role with kick/ban permissions).
+    extra = [
+        r
+        for r in guild.roles
+        if r not in named
+        and r != guild.default_role
+        and (
+            r.permissions.administrator
+            or r.permissions.kick_members
+            or r.permissions.ban_members
+        )
+    ]
+    return named + extra
+
+
+def _is_ticket_staff(member: discord.Member) -> bool:
+    perms = member.guild_permissions
+    if perms.administrator or perms.kick_members or perms.ban_members:
+        return True
+    staff_ids = {r.id for r in _ticket_staff_roles(member.guild)}
+    return any(r.id in staff_ids for r in member.roles)
+
+
+def _ticket_owner_id(channel: discord.abc.GuildChannel):
+    topic = channel.topic or ""
+    if topic.startswith("ticket:"):
+        try:
+            return int(topic.split(":", 1)[1])
+        except ValueError:
+            return None
+    return None
+
+
+def _ticket_channel_name(user: discord.abc.User) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", user.name.lower()).strip("-") or "user"
+    return f"ticket-{base[:80]}"
+
+
+class TicketPanelView(discord.ui.View):
+    """Persistent 'Open a Ticket' panel shown in #ticket-center."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Open a Ticket",
+        style=discord.ButtonStyle.primary,
+        emoji="🎫",
+        custom_id="n3_ticket_open",
+    )
+    async def open_ticket(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        user = interaction.user
+        if guild is None or not isinstance(user, discord.Member):
+            await interaction.followup.send(
+                "Tickets only work inside the server.", ephemeral=True
+            )
+            return
+        # Serialize creation per user: two rapid clicks must not both pass
+        # the duplicate scan before either channel exists.
+        key = (guild.id, user.id)
+        if key in _ticket_creating:
+            await interaction.followup.send(
+                "Your ticket is already being created — one moment.",
+                ephemeral=True,
+            )
+            return
+        _ticket_creating.add(key)
+        try:
+            await self._create_ticket(interaction, guild, user)
+        finally:
+            _ticket_creating.discard(key)
+
+    async def _create_ticket(
+        self,
+        interaction: discord.Interaction,
+        guild: discord.Guild,
+        user: discord.Member,
+    ):
+        category = discord.utils.get(guild.categories, name=_TICKET_CATEGORY)
+        if category is None:
+            await interaction.followup.send(
+                "The ticket center isn't set up yet — "
+                "a mod needs to run /ticket setup first.",
+                ephemeral=True,
+            )
+            return
+        marker = f"ticket:{user.id}"
+        for ch in category.text_channels:
+            if ch.topic == marker:
+                await interaction.followup.send(
+                    f"You already have an open ticket: {ch.mention}",
+                    ephemeral=True,
+                )
+                return
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            user: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True,
+                embed_links=True,
+            ),
+        }
+        for role in _ticket_staff_roles(guild):
+            overwrites[role] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+            )
+        # The @everyone denial above would also hide the channel from the bot
+        # itself — grant it explicit access so it can post and manage tickets.
+        me = guild.me
+        if me is not None:
+            overwrites[me] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True,
+                embed_links=True,
+            )
+        name = _ticket_channel_name(user)
+        if discord.utils.get(category.text_channels, name=name):
+            name = f"{name}-{str(user.id)[-4:]}"
+        try:
+            channel = await guild.create_text_channel(
+                name,
+                category=category,
+                overwrites=overwrites,
+                topic=marker,
+                reason=f"Ticket opened by {user}",
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "I don't have permission to create channels. "
+                'Give me the "Manage Channels" permission and try again.',
+                ephemeral=True,
+            )
+            return
+        embed = discord.Embed(
+            title=f"Ticket — {user.display_name}",
+            description=(
+                f"{user.mention}, describe your issue and I'll try to answer "
+                "right away.\n\n"
+                "I've notified the moderators — someone will be with you shortly.\n\n"
+                "Press **Close Ticket** below when it's resolved."
+            ),
+            color=0x14B8A6,
+        )
+        # Ping staff (or the server owner) so the new ticket gets looked at.
+        staff_roles = _ticket_staff_roles(guild)
+        pings = [r.mention for r in staff_roles]
+        if not pings and guild.owner:
+            pings = [guild.owner.mention]
+        await channel.send(
+            " ".join(pings) if pings else "New ticket opened.",
+            embed=embed,
+            view=TicketCloseView(),
+        )
+        await interaction.followup.send(
+            f"Your ticket is ready: {channel.mention}", ephemeral=True
+        )
+
+
+class TicketCloseView(discord.ui.View):
+    """Per-ticket 'Close Ticket' button. The channel is interaction.channel,
+    so the custom_id stays static and the view is persistent."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Close Ticket",
+        style=discord.ButtonStyle.danger,
+        emoji="🔒",
+        custom_id="n3_ticket_close",
+    )
+    async def close_ticket(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        channel = interaction.channel
+        user = interaction.user
+        if (
+            channel is None
+            or interaction.guild is None
+            or not isinstance(channel, discord.TextChannel)
+            or _ticket_owner_id(channel) is None
+        ):
+            await interaction.response.send_message(
+                "This isn't a ticket channel.", ephemeral=True
+            )
+            return
+        owner_id = _ticket_owner_id(channel)
+        is_staff = isinstance(user, discord.Member) and _is_ticket_staff(user)
+        if user.id != owner_id and not is_staff:
+            await interaction.response.send_message(
+                "Only the ticket owner or staff can close this ticket.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "Close this ticket? This deletes the channel.",
+            view=TicketCloseConfirmView(),
+            ephemeral=True,
+        )
+
+
+class TicketCloseConfirmView(discord.ui.View):
+    """Yes/No confirmation for closing a ticket (ephemeral)."""
+
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(
+        label="Yes, close it",
+        style=discord.ButtonStyle.danger,
+        custom_id="n3_ticket_yes",
+    )
+    async def confirm_yes(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        channel = interaction.channel
+        if (
+            channel is None
+            or not isinstance(channel, discord.TextChannel)
+            or _ticket_owner_id(channel) is None
+        ):
+            await interaction.response.send_message(
+                "This ticket no longer exists.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            "Closing the ticket…", ephemeral=True
+        )
+        try:
+            await channel.delete(
+                reason=f"Ticket closed by {interaction.user}"
+            )
+        except discord.HTTPException:
+            pass
+
+    @discord.ui.button(
+        label="Keep open",
+        style=discord.ButtonStyle.secondary,
+        custom_id="n3_ticket_no",
+    )
+    async def confirm_no(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.send_message("Ticket kept open.", ephemeral=True)
+
+
+async def _ticket_setup_hook() -> None:
+    # NOTE: TicketCloseConfirmView is NOT registered here — it has a timeout
+    # (ephemeral confirm), and add_view() raises ValueError for non-persistent
+    # views, which would abort startup. It is attached when created instead.
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketCloseView())
+    _ticket_watchdog.start()
+
+
+bot.setup_hook = _ticket_setup_hook
+
+ticket_group = app_commands.Group(name="ticket", description="Support tickets.")
+
+
+@ticket_group.command(name="setup", description="Create the ticket center (mods only).")
+@_manage_server()
+async def ticket_setup_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    if guild is None:
+        await interaction.followup.send("Run this inside the server.", ephemeral=True)
+        return
+    me = guild.me
+    if me is None or not me.guild_permissions.manage_channels:
+        await interaction.followup.send(
+            'I need the "Manage Channels" permission to set up the ticket center. '
+            "Give the bot that permission and run /ticket setup again.",
+            ephemeral=True,
+        )
+        return
+    category = discord.utils.get(guild.categories, name=_TICKET_CATEGORY)
+    try:
+        if category is None:
+            category = await guild.create_category(
+                _TICKET_CATEGORY, reason="Ticket center setup"
+            )
+        channel = discord.utils.get(
+            category.text_channels, name=_TICKET_PANEL_CHANNEL
+        )
+        if channel is None:
+            channel = await category.create_text_channel(
+                _TICKET_PANEL_CHANNEL,
+                topic="Open a support ticket.",
+                reason="Ticket center setup",
+            )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            'I need the "Manage Channels" permission to set up the ticket center. '
+            "Give the bot that permission and run /ticket setup again.",
+            ephemeral=True,
+        )
+        return
+    # Refresh the panel: remove my old panel messages, then post a new one.
+    try:
+        async for msg in channel.history(limit=50):
+            if msg.author == bot.user and msg.components:
+                try:
+                    await msg.delete()
+                except discord.HTTPException:
+                    pass
+    except discord.HTTPException:
+        pass
+    embed = discord.Embed(
+        title="🎫 Support Tickets",
+        description=(
+            "Need help, want to report something, or have a question for the mods?\n\n"
+            "Press **Open a Ticket** below and a private channel will be "
+            "created for you and the staff."
+        ),
+        color=0x14B8A6,
+    )
+    await channel.send(embed=embed, view=TicketPanelView())
+    await interaction.followup.send(
+        f"Ticket center is ready in {channel.mention}.", ephemeral=True
+    )
+
+
+bot.tree.add_command(ticket_group)
+
+
+# --- Ticket auto-answer + takeover -------------------------------------------
+# Inside ticket channels the bot answers questions itself using the engine
+# FAQ. If a ticket sits with no staff reply for _TAKEOVER_AFTER_MIN minutes,
+# the watchdog takes over: it answers from the FAQ when it can, and tells
+# the user a moderator will follow up when one can't.
+
+_TAKEOVER_AFTER_MIN = 10
+_ticket_acked: set[int] = set()       # tickets that got the "someone will be with you shortly" note
+_ticket_answered: set[int] = set()    # user message ids the bot already answered
+_ticket_taken_over: set[int] = set()  # tickets the watchdog already took over
+_ticket_creating: set[tuple[int, int]] = set()  # (guild_id, user_id) with a ticket being created
+
+_QUESTION_START = (
+    "who", "what", "when", "where", "why", "how", "can", "is", "are",
+    "do", "does", "which", "should",
+)
+
+
+def _looks_like_question(text: str) -> bool:
+    t = text.strip().lower()
+    return "?" in t or t.startswith(_QUESTION_START)
+
+
+def _is_ticket_channel(channel) -> bool:
+    return (
+        isinstance(channel, discord.TextChannel)
+        and channel.category is not None
+        and channel.category.name == _TICKET_CATEGORY
+        and _ticket_owner_id(channel) is not None
+    )
+
+
+async def _handle_ticket_message(message: discord.Message):
+    """Auto-answer questions posted in ticket channels."""
+    author = message.author
+    if author.bot or not isinstance(author, discord.Member):
+        return
+    if _is_ticket_staff(author):
+        return  # staff are talking; stay out of the way
+    text = (message.content or "").strip()
+    if not text:
+        return
+    answer = answer_question(text)
+    try:
+        if answer:
+            await message.reply(answer)
+            _ticket_answered.add(message.id)
+        elif (
+            _looks_like_question(text)
+            and message.channel.id not in _ticket_acked
+        ):
+            _ticket_acked.add(message.channel.id)
+            await message.channel.send(
+                f"{author.mention}, noted — someone will be with you shortly."
+            )
+    except discord.HTTPException:
+        pass
+
+
+@tasks.loop(minutes=5)
+async def _ticket_watchdog():
+    """Take over tickets that have no staff reply."""
+    for guild in bot.guilds:
+        category = discord.utils.get(guild.categories, name=_TICKET_CATEGORY)
+        if category is None:
+            continue
+        for ch in category.text_channels:
+            if _ticket_owner_id(ch) is None or ch.id in _ticket_taken_over:
+                continue
+            try:
+                last_user_msg = None
+                async for msg in ch.history(limit=30):
+                    if msg.author.bot:
+                        continue
+                    if isinstance(msg.author, discord.Member) and _is_ticket_staff(
+                        msg.author
+                    ):
+                        last_user_msg = None  # staff have the latest word
+                    else:
+                        last_user_msg = msg
+                    break
+                if last_user_msg is None or last_user_msg.id in _ticket_answered:
+                    continue
+                age_min = (
+                    discord.utils.utcnow() - last_user_msg.created_at
+                ).total_seconds() / 60
+                if age_min < _TAKEOVER_AFTER_MIN:
+                    continue
+                answer = answer_question(last_user_msg.content or "")
+                if answer:
+                    text = (
+                        "No moderator is available right now, so I'll take this one. "
+                        f"{last_user_msg.author.mention}\n\n{answer}"
+                    )
+                else:
+                    text = (
+                        f"{last_user_msg.author.mention}, no moderator is available "
+                        "right now. I've flagged your question and a moderator "
+                        "will follow up as soon as they're back."
+                    )
+                await ch.send(text)
+                _ticket_taken_over.add(ch.id)
+            except discord.HTTPException:
+                pass
+
+
+@_ticket_watchdog.before_loop
+async def _ticket_watchdog_before():
+    await bot.wait_until_ready()
+
+
 @bot.tree.error
 async def on_app_command_error(
     interaction: discord.Interaction, error: app_commands.AppCommandError
@@ -494,6 +986,8 @@ async def on_message(message: discord.Message):
                 await message.channel.send("Please do not swear.")
             except discord.HTTPException:
                 pass
+    elif _is_ticket_channel(message.channel):
+        await _handle_ticket_message(message)
     await bot.process_commands(message)
 
 
