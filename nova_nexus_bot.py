@@ -443,12 +443,16 @@ async def on_message(message: discord.Message):
     if message.guild is None:
         await _handle_dm(message)
     elif _PROFANITY.search(message.content or ""):
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
         now = time.monotonic()
         last = _swear_warned_at.get(message.author.id, 0.0)
         if now - last >= _SWEAR_COOLDOWN_S:
             _swear_warned_at[message.author.id] = now
             try:
-                await message.reply("Please do not swear.", mention_author=True)
+                await message.channel.send("Please do not swear.")
             except discord.HTTPException:
                 pass
     await bot.process_commands(message)
