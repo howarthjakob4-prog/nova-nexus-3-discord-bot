@@ -14,7 +14,7 @@ import urllib.request
 from datetime import timedelta
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -205,10 +205,25 @@ ENGINE_FAQ = [
         "Active work: the trailer studio's procedural models and cinematic FX. "
         "Ask the owner for the latest status.",
     ),
+    (
+        ("appeal",),
+        "To appeal a warning, timeout, kick, or ban, **DM a moderator directly** "
+        "— don't argue rulings in public channels.",
+    ),
+    (
+        ("report", "reporting"),
+        "To report a member, open a ticket with their username and a description "
+        "of what happened. Screenshots help.",
+    ),
+    (
+        ("role", "roles"),
+        "For server roles, ask a moderator — they handle role requests.",
+    ),
 ]
 
 
-def answer_question(question: str) -> str:
+def answer_question(question: str) -> str | None:
+    """Return the FAQ answer, or None when nothing matches."""
     q = question.lower()
     generic = {"what is", "about"}
     best, best_hits = None, 0
@@ -217,13 +232,14 @@ def answer_question(question: str) -> str:
         specific = sum(1 for kw in keywords if kw in q and kw not in generic)
         if hits > best_hits and specific >= 1:
             best, best_hits = answer, hits
-    if best:
-        return best
-    return (
-        "I only talk about the **Nova Nexus 3 engine**. Ask me something "
-        "about it — what it is, the Studio, the ships, the villain, "
-        "anything engine."
-    )
+    return best
+
+
+_ASK_FALLBACK = (
+    "I only talk about the **Nova Nexus 3 engine**. Ask me something "
+    "about it — what it is, the Studio, the ships, the villain, "
+    "anything engine."
+)
 
 
 @bot.event
@@ -309,7 +325,7 @@ async def engine_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name="ask", description="Ask anything about the Nova Nexus 3 engine.")
 async def ask_cmd(interaction: discord.Interaction, question: str):
-    await interaction.response.send_message(answer_question(question))
+    await interaction.response.send_message(answer_question(question) or _ASK_FALLBACK)
 
 
 @bot.tree.command(name="rules", description="Community rules.")
@@ -532,7 +548,8 @@ class TicketPanelView(discord.ui.View):
         embed = discord.Embed(
             title=f"Ticket — {user.display_name}",
             description=(
-                f"{user.mention}, describe your issue and a moderator will help.\n\n"
+                f"{user.mention}, describe your issue and I'll try to answer "
+                "right away. If I can't, a moderator will pick it up.\n\n"
                 "Press **Close Ticket** below when it's resolved."
             ),
             color=0x14B8A6,
@@ -635,6 +652,7 @@ async def _ticket_setup_hook() -> None:
     bot.add_view(TicketPanelView())
     bot.add_view(TicketCloseView())
     bot.add_view(TicketCloseConfirmView())
+    _ticket_watchdog.start()
 
 
 bot.setup_hook = _ticket_setup_hook
@@ -706,6 +724,116 @@ async def ticket_setup_cmd(interaction: discord.Interaction):
 
 
 bot.tree.add_command(ticket_group)
+
+
+# --- Ticket auto-answer + takeover -------------------------------------------
+# Inside ticket channels the bot answers questions itself using the engine
+# FAQ. If a ticket sits with no staff reply for _TAKEOVER_AFTER_MIN minutes,
+# the watchdog takes over: it answers from the FAQ when it can, and tells
+# the user a moderator will follow up when one can't.
+
+_TAKEOVER_AFTER_MIN = 10
+_ticket_acked: set[int] = set()       # tickets that got the "mods will follow up" note
+_ticket_answered: set[int] = set()    # user message ids the bot already answered
+_ticket_taken_over: set[int] = set()  # tickets the watchdog already took over
+
+_QUESTION_START = (
+    "who", "what", "when", "where", "why", "how", "can", "is", "are",
+    "do", "does", "which", "should",
+)
+
+
+def _looks_like_question(text: str) -> bool:
+    t = text.strip().lower()
+    return "?" in t or t.startswith(_QUESTION_START)
+
+
+def _is_ticket_channel(channel) -> bool:
+    return (
+        isinstance(channel, discord.TextChannel)
+        and channel.category is not None
+        and channel.category.name == _TICKET_CATEGORY
+        and _ticket_owner_id(channel) is not None
+    )
+
+
+async def _handle_ticket_message(message: discord.Message):
+    """Auto-answer questions posted in ticket channels."""
+    author = message.author
+    if author.bot or not isinstance(author, discord.Member):
+        return
+    if _is_ticket_staff(author):
+        return  # staff are talking; stay out of the way
+    text = (message.content or "").strip()
+    if not text:
+        return
+    answer = answer_question(text)
+    try:
+        if answer:
+            await message.reply(answer)
+            _ticket_answered.add(message.id)
+        elif (
+            _looks_like_question(text)
+            and message.channel.id not in _ticket_acked
+        ):
+            _ticket_acked.add(message.channel.id)
+            await message.channel.send(
+                f"{author.mention}, noted — a moderator will follow up on that shortly."
+            )
+    except discord.HTTPException:
+        pass
+
+
+@tasks.loop(minutes=5)
+async def _ticket_watchdog():
+    """Take over tickets that have no staff reply."""
+    for guild in bot.guilds:
+        category = discord.utils.get(guild.categories, name=_TICKET_CATEGORY)
+        if category is None:
+            continue
+        for ch in category.text_channels:
+            if _ticket_owner_id(ch) is None or ch.id in _ticket_taken_over:
+                continue
+            try:
+                last_user_msg = None
+                async for msg in ch.history(limit=30):
+                    if msg.author.bot:
+                        continue
+                    if isinstance(msg.author, discord.Member) and _is_ticket_staff(
+                        msg.author
+                    ):
+                        last_user_msg = None  # staff have the latest word
+                    else:
+                        last_user_msg = msg
+                    break
+                if last_user_msg is None or last_user_msg.id in _ticket_answered:
+                    continue
+                age_min = (
+                    discord.utils.utcnow() - last_user_msg.created_at
+                ).total_seconds() / 60
+                if age_min < _TAKEOVER_AFTER_MIN:
+                    continue
+                answer = answer_question(last_user_msg.content or "")
+                if answer:
+                    text = (
+                        "No moderator is available right now, so I'll take this one. "
+                        f"{last_user_msg.author.mention}\n\n{answer}"
+                    )
+                else:
+                    text = (
+                        f"{last_user_msg.author.mention}, no moderator is available "
+                        "right now. I've flagged your question and a moderator "
+                        "will follow up as soon as they're back."
+                    )
+                await ch.send(text)
+                _ticket_taken_over.add(ch.id)
+            except discord.HTTPException:
+                pass
+
+
+@_ticket_watchdog.before_loop
+async def _ticket_watchdog_before():
+    await bot.wait_until_ready()
 
 
 @bot.tree.error
@@ -799,6 +927,8 @@ async def on_message(message: discord.Message):
                 await message.channel.send("Please do not swear.")
             except discord.HTTPException:
                 pass
+    elif _is_ticket_channel(message.channel):
+        await _handle_ticket_message(message)
     await bot.process_commands(message)
 
 
