@@ -1,0 +1,27 @@
+name: Nova Nexus 3 Engine Bot
+
+# Manual runs only: Actions tab -> "Nova Nexus 3 Engine Bot" -> Run workflow.
+# Each run lasts up to 6 hours (GitHub cap). Not a 24/7 host.
+on:
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the bot
+        run: python -u nova_nexus_bot.py
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
