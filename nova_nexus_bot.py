@@ -307,12 +307,26 @@ async def ask_cmd(interaction: discord.Interaction, question: str):
 @bot.tree.command(name="rules", description="Community rules.")
 async def rules_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(
-        "**Community Rules**\n"
-        "1. Be respectful — no harassment, hate, or spam.\n"
-        "2. Keep it on topic: engine dev, games, cinematics.\n"
-        "3. No piracy or leaked proprietary content.\n"
-        "4. Use the right channels for questions and showcases.\n"
-        "5. Mods have the final word."
+        "**Nova Nexus 3 — Community Rules**\n"
+        "1. **Be respectful.** No harassment, hate speech, slurs, or personal attacks. "
+        "Treat everyone like a fellow builder.\n"
+        "2. **No swearing.** Keep it clean — the bot removes profanity automatically.\n"
+        "3. **Stay on topic.** This server is for Nova Nexus 3 engine dev, games, "
+        "and cinematics. Take off-topic chat somewhere else.\n"
+        "4. **No spam.** No flooding, mass mentions, or repeated messages. "
+        "No self-promo or ads without mod approval.\n"
+        "5. **No piracy or leaks.** Don't share pirated software, leaked proprietary "
+        "content, cracks, or license keys.\n"
+        "6. **Keep it safe and legal.** No NSFW content, no gore, nothing illegal. "
+        "This is an all-ages community.\n"
+        "7. **Use the right channels.** Questions in help, showcases in showcase — "
+        "check each channel's topic before posting.\n"
+        "8. **No cheats or exploits.** Don't share hacks, cheats, or tools meant to "
+        "break games or the engine's protections.\n"
+        "9. **Respect creators.** Credit other people's work. Don't repost someone's "
+        "assets or code as your own.\n"
+        "10. **Mods have the final word.** Warnings, timeouts, kicks, and bans are at "
+        "moderator discretion. To appeal, DM a mod — don't argue rulings in public."
     )
 
 
