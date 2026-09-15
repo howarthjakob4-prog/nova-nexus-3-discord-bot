@@ -549,12 +549,22 @@ class TicketPanelView(discord.ui.View):
             title=f"Ticket — {user.display_name}",
             description=(
                 f"{user.mention}, describe your issue and I'll try to answer "
-                "right away. If I can't, a moderator will pick it up.\n\n"
+                "right away.\n\n"
+                "I've notified the moderators — someone will be with you shortly.\n\n"
                 "Press **Close Ticket** below when it's resolved."
             ),
             color=0x14B8A6,
         )
-        await channel.send(embed=embed, view=TicketCloseView())
+        # Ping staff (or the server owner) so the new ticket gets looked at.
+        staff_roles = _ticket_staff_roles(guild)
+        pings = [r.mention for r in staff_roles]
+        if not pings and guild.owner:
+            pings = [guild.owner.mention]
+        await channel.send(
+            " ".join(pings) if pings else "New ticket opened.",
+            embed=embed,
+            view=TicketCloseView(),
+        )
         await interaction.followup.send(
             f"Your ticket is ready: {channel.mention}", ephemeral=True
         )
@@ -778,7 +788,7 @@ async def _handle_ticket_message(message: discord.Message):
         ):
             _ticket_acked.add(message.channel.id)
             await message.channel.send(
-                f"{author.mention}, noted — a moderator will follow up on that shortly."
+                f"{author.mention}, noted — someone will be with you shortly."
             )
     except discord.HTTPException:
         pass
