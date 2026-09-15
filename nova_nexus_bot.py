@@ -6,6 +6,7 @@ for welcome messages. Invite with the `bot` and `applications.commands`
 scopes so slash commands show up.
 """
 import asyncio
+import io
 import os
 import re
 import time
@@ -310,14 +311,31 @@ async def ask_cmd(interaction: discord.Interaction, question: str):
 async def rules_cmd(interaction: discord.Interaction):
     await interaction.response.defer()
     text = await asyncio.to_thread(_fetch_rules)
-    await interaction.followup.send(text or _RULES_FALLBACK)
+    files = []
+    for fname in _POLICY_FILES:
+        data = await asyncio.to_thread(_fetch_github_file, fname)
+        if data:
+            files.append(
+                discord.File(io.BytesIO(data.encode("utf-8")), filename=fname)
+            )
+    note = (
+        "\n\n**Project policies attached:** engine rules, "
+        "Nova Nexus 3 license, Unreal license rules."
+        if files
+        else ""
+    )
+    await interaction.followup.send((text or _RULES_FALLBACK) + note, files=files)
 
 
-_RULES_URL = (
-    "https://raw.githubusercontent.com/howarthjakob4-prog/"
-    "Nova-Nexus-3/main/DISCORD_RULES.md"
+_GITHUB_RAW = (
+    "https://raw.githubusercontent.com/howarthjakob4-prog/Nova-Nexus-3/main/"
 )
 _RULES_TOKEN = os.environ.get("RULES_TOKEN")  # PAT with read access to Nova-Nexus-3
+_POLICY_FILES = (
+    "ENGINE_RULES.md",
+    "NOVA_NEXUS_3_LICENSE.md",
+    "EPIC_UNREAL_LICENSE_RULES.md",
+)
 _RULES_FALLBACK = (
     "**Nova Nexus 3 — Community Rules**\n"
     "1. **Be respectful.** No harassment, hate speech, slurs, or personal attacks.\n"
@@ -333,17 +351,22 @@ _RULES_FALLBACK = (
 )
 
 
-def _fetch_rules() -> str:
-    """Pull the live rules from Nova-Nexus-3's DISCORD_RULES.md (single source)."""
+def _fetch_github_file(name: str) -> str:
+    """Pull any file from the Nova-Nexus-3 repo (single source of truth)."""
     try:
         headers = {"User-Agent": "nova-nexus-3-bot"}
         if _RULES_TOKEN:
             headers["Authorization"] = f"Bearer {_RULES_TOKEN}"
-        req = urllib.request.Request(_RULES_URL, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.read().decode("utf-8", "replace").strip()[:1900]
+        req = urllib.request.Request(_GITHUB_RAW + name, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.read().decode("utf-8", "replace").strip()
     except Exception:  # noqa: BLE001
-        return _RULES_FALLBACK
+        return ""
+
+
+def _fetch_rules() -> str:
+    """Pull the live rules from Nova-Nexus-3's DISCORD_RULES.md (single source)."""
+    return _fetch_github_file("DISCORD_RULES.md")[:1900] or _RULES_FALLBACK
 
 
 @bot.tree.command(name="links", description="Where to find the Nova Nexus 3 project.")
