@@ -234,7 +234,9 @@ async def on_ready():
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
             bot.tree.copy_global_to(guild=guild)
+            bot.tree.clear_commands(guild=None)
             synced = await bot.tree.sync(guild=guild)
+            await bot.tree.sync()
         else:
             synced = await bot.tree.sync()
         print(f"[nova-nexus] online as {bot.user} — synced {len(synced)} commands")
