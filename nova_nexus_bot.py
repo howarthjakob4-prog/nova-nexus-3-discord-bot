@@ -446,7 +446,21 @@ def _manage_server():
 
 
 def _ticket_staff_roles(guild: discord.Guild) -> list:
-    return [r for r in guild.roles if r.name.lower() in _TICKET_STAFF_ROLE_NAMES]
+    named = [r for r in guild.roles if r.name.lower() in _TICKET_STAFF_ROLE_NAMES]
+    # Also cover staff whose powers come from role permissions rather than
+    # the role name (e.g. a "Helpers" role with kick/ban permissions).
+    extra = [
+        r
+        for r in guild.roles
+        if r not in named
+        and r != guild.default_role
+        and (
+            r.permissions.administrator
+            or r.permissions.kick_members
+            or r.permissions.ban_members
+        )
+    ]
+    return named + extra
 
 
 def _is_ticket_staff(member: discord.Member) -> bool:
@@ -495,6 +509,27 @@ class TicketPanelView(discord.ui.View):
                 "Tickets only work inside the server.", ephemeral=True
             )
             return
+        # Serialize creation per user: two rapid clicks must not both pass
+        # the duplicate scan before either channel exists.
+        key = (guild.id, user.id)
+        if key in _ticket_creating:
+            await interaction.followup.send(
+                "Your ticket is already being created — one moment.",
+                ephemeral=True,
+            )
+            return
+        _ticket_creating.add(key)
+        try:
+            await self._create_ticket(interaction, guild, user)
+        finally:
+            _ticket_creating.discard(key)
+
+    async def _create_ticket(
+        self,
+        interaction: discord.Interaction,
+        guild: discord.Guild,
+        user: discord.Member,
+    ):
         category = discord.utils.get(guild.categories, name=_TICKET_CATEGORY)
         if category is None:
             await interaction.followup.send(
@@ -526,6 +561,17 @@ class TicketPanelView(discord.ui.View):
                 view_channel=True,
                 send_messages=True,
                 read_message_history=True,
+            )
+        # The @everyone denial above would also hide the channel from the bot
+        # itself — grant it explicit access so it can post and manage tickets.
+        me = guild.me
+        if me is not None:
+            overwrites[me] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True,
+                embed_links=True,
             )
         name = _ticket_channel_name(user)
         if discord.utils.get(category.text_channels, name=name):
@@ -659,9 +705,11 @@ class TicketCloseConfirmView(discord.ui.View):
 
 
 async def _ticket_setup_hook() -> None:
+    # NOTE: TicketCloseConfirmView is NOT registered here — it has a timeout
+    # (ephemeral confirm), and add_view() raises ValueError for non-persistent
+    # views, which would abort startup. It is attached when created instead.
     bot.add_view(TicketPanelView())
     bot.add_view(TicketCloseView())
-    bot.add_view(TicketCloseConfirmView())
     _ticket_watchdog.start()
 
 
@@ -743,9 +791,10 @@ bot.tree.add_command(ticket_group)
 # the user a moderator will follow up when one can't.
 
 _TAKEOVER_AFTER_MIN = 10
-_ticket_acked: set[int] = set()       # tickets that got the "mods will follow up" note
+_ticket_acked: set[int] = set()       # tickets that got the "someone will be with you shortly" note
 _ticket_answered: set[int] = set()    # user message ids the bot already answered
 _ticket_taken_over: set[int] = set()  # tickets the watchdog already took over
+_ticket_creating: set[tuple[int, int]] = set()  # (guild_id, user_id) with a ticket being created
 
 _QUESTION_START = (
     "who", "what", "when", "where", "why", "how", "can", "is", "are",
