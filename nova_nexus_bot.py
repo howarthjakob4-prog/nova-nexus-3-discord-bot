@@ -311,6 +311,11 @@ async def ask_cmd(interaction: discord.Interaction, question: str):
 async def rules_cmd(interaction: discord.Interaction):
     await interaction.response.defer()
     text = await asyncio.to_thread(_fetch_rules)
+    if not text:
+        await interaction.followup.send(
+            "Couldn't load the rules from GitHub — try again in a bit."
+        )
+        return
     files = []
     for fname in _POLICY_FILES:
         data = await asyncio.to_thread(_fetch_github_file, fname)
@@ -318,7 +323,7 @@ async def rules_cmd(interaction: discord.Interaction):
             files.append(
                 discord.File(io.BytesIO(data.encode("utf-8")), filename=fname)
             )
-    await interaction.followup.send(text or _RULES_FALLBACK, files=files)
+    await interaction.followup.send(text, files=files)
 
 
 _GITHUB_RAW = (
@@ -329,19 +334,6 @@ _POLICY_FILES = (
     "ENGINE_RULES.md",
     "NOVA_NEXUS_3_LICENSE.md",
     "EPIC_UNREAL_LICENSE_RULES.md",
-)
-_RULES_FALLBACK = (
-    "**Nova Nexus 3 — Community Rules**\n"
-    "1. **Be respectful.** No harassment, hate speech, slurs, or personal attacks.\n"
-    "2. **No swearing.** Keep it clean — the bot removes profanity automatically.\n"
-    "3. **Stay on topic.** Nova Nexus 3 engine dev, games, and cinematics.\n"
-    "4. **No spam.** No flooding, mass mentions, or repeated messages.\n"
-    "5. **No piracy or leaks.** No pirated software, leaks, cracks, or keys.\n"
-    "6. **Keep it safe and legal.** No NSFW, no gore, nothing illegal.\n"
-    "7. **Use the right channels.** Check each channel's topic before posting.\n"
-    "8. **No cheats or exploits.**\n"
-    "9. **Respect creators.** Credit other people's work.\n"
-    "10. **Mods have the final word.** To appeal, DM a mod."
 )
 
 
@@ -360,7 +352,7 @@ def _fetch_github_file(name: str) -> str:
 
 def _fetch_rules() -> str:
     """Pull the live rules from Nova-Nexus-3's DISCORD_RULES.md (single source)."""
-    return _fetch_github_file("DISCORD_RULES.md")[:1900] or _RULES_FALLBACK
+    return _fetch_github_file("DISCORD_RULES.md")[:1900]
 
 
 @bot.tree.command(name="links", description="Where to find the Nova Nexus 3 project.")
