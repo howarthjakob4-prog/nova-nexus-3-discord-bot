@@ -822,11 +822,13 @@ jobs:
       - name: Post the update to Discord
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_ANNOUNCE_WEBHOOK }}
+          HEAD_COMMIT: ${{ toJSON(github.event.head_commit) }}
+          ACTOR: ${{ github.actor }}
         run: |
           python3 - <<'PYEOF'
           import json, os, urllib.request
           webhook = os.environ["DISCORD_WEBHOOK"]
-          head = ${{ toJSON(github.event.head_commit) }}
+          head = json.loads(os.environ["HEAD_COMMIT"])  # JSON text, not a Python literal
           summary = (head.get("message") or "").split("\\n")[0][:256]
           embed = {
               "title": "⚙️ Nova Nexus 3 engine updated",
@@ -834,7 +836,7 @@ jobs:
               "url": head.get("url"),
               "color": 0x14B8A6,
               "fields": [
-                  {"name": "By", "value": "${{ github.actor }}", "inline": True},
+                  {"name": "By", "value": os.environ["ACTOR"], "inline": True},
                   {
                       "name": "Commit",
                       "value": (head.get("id") or "")[:7] or "—",
@@ -909,15 +911,29 @@ def _wire_engine_announcements(webhook_url: str) -> str:
         except urllib.error.HTTPError as e:
             if e.code != 422:  # 422 = branch already exists; reuse it
                 raise
+        # Reruns must update the existing file: GitHub requires its blob SHA.
+        file_payload = {
+            "message": "Post engine updates to the Discord announcements channel",
+            "content": _b64.b64encode(_ANNOUNCE_WORKFLOW_YAML.encode()).decode(),
+            "branch": _ANNOUNCE_WORKFLOW_BRANCH,
+        }
+        try:
+            existing = _github_api(
+                "GET",
+                repo + "/contents/" + _ANNOUNCE_WORKFLOW_PATH
+                + "?ref=" + _ANNOUNCE_WORKFLOW_BRANCH,
+                token,
+            )
+            if isinstance(existing, dict) and existing.get("sha"):
+                file_payload["sha"] = existing["sha"]
+        except urllib.error.HTTPError as e:
+            if e.code != 404:  # 404 = first run, nothing to update
+                raise
         _github_api(
             "PUT",
             repo + "/contents/" + _ANNOUNCE_WORKFLOW_PATH,
             token,
-            {
-                "message": "Post engine updates to the Discord announcements channel",
-                "content": _b64.b64encode(_ANNOUNCE_WORKFLOW_YAML.encode()).decode(),
-                "branch": _ANNOUNCE_WORKFLOW_BRANCH,
-            },
+            file_payload,
         )
         # 3. Open the PR.
         pr = _github_api(
@@ -938,6 +954,11 @@ def _wire_engine_announcements(webhook_url: str) -> str:
         )
         return pr["html_url"]
     except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise RuntimeError(
+                "GitHub token was rejected (HTTP %d) — it needs the 'repo' "
+                "scope to wire up announcements." % e.code
+            )
         raise RuntimeError(f"GitHub API error {e.code}")
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(str(e))
