@@ -1,14 +1,18 @@
 name: Nova Nexus 3 Engine Bot
 
-# Manual runs only: Actions tab -> "Nova Nexus 3 Engine Bot" -> Run workflow.
-# Each run lasts up to 6 hours (GitHub cap). Not a 24/7 host.
+# Always-on: a fresh run starts every 5 hours (each run is capped at 6h by
+# GitHub). The new run's identify cleanly takes over the token from the
+# previous run, which exits instead of fighting (NOVA_RECONNECT=0).
+# Manual runs: Actions tab -> "Nova Nexus 3 Engine Bot" -> Run workflow.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 */5 * * *"
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 300
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -25,3 +29,4 @@ jobs:
         run: python -u nova_nexus_bot.py
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          NOVA_RECONNECT: "0"

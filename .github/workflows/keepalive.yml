@@ -1,0 +1,25 @@
+name: Keepalive
+
+# GitHub disables scheduled workflows after 60 days with no repository
+# activity. This weekly empty commit counts as activity and keeps the
+# bot's restart schedule alive.
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Empty commit
+        run: |
+          git config user.name "nova-nexus-bot"
+          git config user.email "nova-nexus-bot@example.com"
+          git commit --allow-empty -m "keepalive"
+          git push

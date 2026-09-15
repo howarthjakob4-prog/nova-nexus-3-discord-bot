@@ -376,4 +376,8 @@ async def on_app_command_error(
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Set the DISCORD_TOKEN environment variable first.")
-    bot.run(TOKEN)
+    # NOVA_RECONNECT=0 disables auto-reconnect: used by the scheduled
+    # GitHub Actions runs so a fresh run cleanly takes over from the
+    # previous one instead of the two fighting over the token.
+    reconnect = os.environ.get("NOVA_RECONNECT", "1") == "1"
+    bot.run(TOKEN, reconnect=reconnect)
