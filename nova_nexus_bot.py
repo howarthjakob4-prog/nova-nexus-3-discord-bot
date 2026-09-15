@@ -250,18 +250,41 @@ async def on_ready():
             type=discord.ActivityType.watching, name="Nova Nexus 3 Engine"
         )
     )
+    # The Commands list on the bot's profile only shows *global* commands,
+    # so always sync them globally. The guild sync stays for instant
+    # updates inside the home server.
     try:
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
             bot.tree.copy_global_to(guild=guild)
-            bot.tree.clear_commands(guild=None)
-            synced = await bot.tree.sync(guild=guild)
-            await bot.tree.sync()
-        else:
-            synced = await bot.tree.sync()
-        print(f"[nova-nexus] online as {bot.user} — synced {len(synced)} commands")
+            synced_guild = await bot.tree.sync(guild=guild)
+            print(f"[nova-nexus] synced {len(synced_guild)} guild commands")
+        synced = await bot.tree.sync()
+        print(f"[nova-nexus] online as {bot.user} — synced {len(synced)} global commands")
     except Exception as e:  # noqa: BLE001
         print(f"[nova-nexus] command sync failed: {e}")
+
+    # Profile bio ("About Me" on the bot's profile page). Idempotent: only
+    # updates when it differs, so manual portal edits aren't fought over
+    # every restart — tell the owner before changing this text.
+    try:
+        app_id = bot.application_id or (bot.user.id if bot.user else None)
+        info = await bot.application_info()
+        bio = (
+            "- Nova Nexus 3 engine community bot.\n"
+            "- Type /help for all my commands.\n"
+            "- Support tickets, engine announcements, rules, and chat built in.\n"
+            "- Invite: https://discord.com/oauth2/authorize"
+            f"?client_id={app_id}&permissions=8&scope=bot+applications.commands"
+        )
+        if (info.description or "") != bio and app_id:
+            route = discord.http.Route(
+                "PATCH", "/applications/{application_id}", application_id=app_id
+            )
+            await bot.http.request(route, json={"description": bio})
+            print("[nova-nexus] profile bio updated")
+    except Exception as e:  # noqa: BLE001
+        print(f"[nova-nexus] profile bio update failed: {e}")
 
 
 @bot.event
