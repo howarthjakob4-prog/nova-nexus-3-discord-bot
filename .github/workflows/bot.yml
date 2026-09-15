@@ -1,5 +1,12 @@
 name: Nova Nexus 3 Engine Bot
 
+# No-overlap guard: only one run at a time. A new run cancels the
+# older in-progress run instead of two bot copies fighting over the
+# same Discord token.
+concurrency:
+  group: nova-nexus-bot-singleton
+  cancel-in-progress: true
+
 # Always-on: a fresh run starts every 5 hours (each run is capped at 6h by
 # GitHub). The new run's identify cleanly takes over the token from the
 # previous run, which exits instead of fighting (NOVA_RECONNECT=0).
