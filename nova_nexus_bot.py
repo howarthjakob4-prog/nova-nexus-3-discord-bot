@@ -318,13 +318,7 @@ async def rules_cmd(interaction: discord.Interaction):
             files.append(
                 discord.File(io.BytesIO(data.encode("utf-8")), filename=fname)
             )
-    note = (
-        "\n\n**Project policies attached:** "
-        "Nova Nexus 3 license, Unreal license rules."
-        if files
-        else ""
-    )
-    await interaction.followup.send((text or _RULES_FALLBACK) + note, files=files)
+    await interaction.followup.send(text or _RULES_FALLBACK, files=files)
 
 
 _GITHUB_RAW = (
