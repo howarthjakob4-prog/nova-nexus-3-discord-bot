@@ -1345,9 +1345,10 @@ _BOT_REPO_OWNER = "howarthjakob4-prog"
 _BOT_REPO = "nova-nexus-3-discord-bot"
 
 _PREMIUM_UPGRADE_MSG = (
-    "That's a premium feature — this server isn't premium yet. Premium adds "
-    "custom AI knowledge, custom commands, and scheduled announcements, and "
-    "the free commands stay free forever. Ask the bot owner about upgrading."
+    "That's a premium feature — this server isn't premium yet. Premium is "
+    "$200 and adds custom AI knowledge, custom commands, and scheduled "
+    "announcements. The free commands stay free forever. "
+    "Ask the bot owner about upgrading."
 )
 
 _premium_cache: dict[str, tuple[float, object]] = {}
@@ -1473,8 +1474,8 @@ async def premium_status_cmd(interaction: discord.Interaction):
         embed.add_field(
             name="How to upgrade",
             value=(
-                "Ask the bot owner to enable premium for this server. "
-                "Free commands stay free forever."
+                "Premium is $200 — ask the bot owner to enable it for this "
+                "server. Free commands stay free forever."
             ),
             inline=False,
         )
