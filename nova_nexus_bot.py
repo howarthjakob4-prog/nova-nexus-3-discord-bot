@@ -429,8 +429,7 @@ def _mod_only():
 async def kick_cmd(
     interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given"
 ):
-    await member.kick(reason=reason)
-    await interaction.response.send_message(f"Kicked {member.mention}: {reason}")
+    await _mod_action(interaction, member, reason, "kick")
 
 
 @bot.tree.command(name="ban", description="Ban a member (mods only).")
@@ -438,8 +437,7 @@ async def kick_cmd(
 async def ban_cmd(
     interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given"
 ):
-    await member.ban(reason=reason)
-    await interaction.response.send_message(f"Banned {member.mention}: {reason}")
+    await _mod_action(interaction, member, reason, "ban")
 
 
 @bot.tree.command(name="timeout", description="Time out a member (mods only).")
@@ -450,11 +448,111 @@ async def timeout_cmd(
     minutes: int = 10,
     reason: str = "No reason given",
 ):
-    until = discord.utils.utcnow() + timedelta(minutes=minutes)
-    await member.timeout(until, reason=reason)
-    await interaction.response.send_message(
-        f"Timed out {member.mention} for {minutes}m: {reason}"
-    )
+    await _mod_action(interaction, member, reason, "timeout", minutes=minutes)
+
+
+async def _mod_target(
+    guild: discord.Guild, member: discord.Member
+) -> tuple[discord.Member | None, str | None]:
+    """Re-resolve a mod-command target; stale Member objects 404 the action.
+
+    Returns (member, None) on success or (None, error_message).
+    """
+    target = guild.get_member(member.id)
+    if target is None:
+        try:
+            target = await guild.fetch_member(member.id)
+        except discord.NotFound:
+            return None, "That user isn't in this server anymore."
+        except discord.HTTPException as e:
+            return None, f"Couldn't look up that user (Discord error {e.status})."
+    return target, None
+
+
+def _mod_hierarchy_blocked(guild: discord.Guild, target: discord.Member) -> str | None:
+    """Return a human reason when the bot may not act on target, else None."""
+    me = guild.me
+    if me is None:
+        return "I couldn't check my own role — try again in a bit."
+    if target.id == guild.owner_id:
+        return "I can't touch the server owner."
+    if target.id == me.id:
+        return "I can't moderate myself."
+    if target.top_role >= me.top_role:
+        return (
+            f"I can't touch {target.mention}: their top role is at or "
+            f"above mine ({me.top_role})."
+        )
+    return None
+
+
+async def _mod_reply(
+    interaction: discord.Interaction, text: str, ephemeral: bool = False
+) -> None:
+    """Answer a (deferred) mod command, tolerating a stale interaction."""
+    try:
+        await interaction.followup.send(text, ephemeral=ephemeral)
+    except (discord.NotFound, discord.HTTPException):
+        pass  # interaction expired; nothing left to answer
+
+
+async def _mod_action(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str,
+    action: str,
+    minutes: int = 10,
+) -> None:
+    """Shared kick/ban/timeout flow: defer, re-resolve target, check
+    hierarchy, act, and report Discord failures in plain language instead
+    of dying on a 403/404."""
+    guild = interaction.guild
+    if guild is None:
+        return
+    try:
+        await interaction.response.defer()
+    except (discord.NotFound, discord.HTTPException):
+        return  # interaction already stale; nothing to answer
+    target, err = await _mod_target(guild, member)
+    if err is not None:
+        await _mod_reply(interaction, err, ephemeral=True)
+        return
+    blocked = _mod_hierarchy_blocked(guild, target)
+    if blocked is not None:
+        await _mod_reply(interaction, blocked, ephemeral=True)
+        return
+    past = {"kick": "Kicked", "ban": "Banned", "timeout": f"Timed out for {minutes}m"}
+    try:
+        if action == "kick":
+            await target.kick(reason=reason)
+        elif action == "ban":
+            await target.ban(reason=reason)
+        else:
+            await target.timeout(
+                discord.utils.utcnow() + timedelta(minutes=minutes), reason=reason
+            )
+    except discord.Forbidden:
+        await _mod_reply(
+            interaction,
+            f"I don't have permission to {action} {target.mention}.",
+            ephemeral=True,
+        )
+        return
+    except discord.NotFound:
+        await _mod_reply(
+            interaction,
+            f"{target.mention} is already gone — nothing to {action}.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as e:
+        await _mod_reply(
+            interaction,
+            f"The {action} failed (Discord error {e.status}). Try again in a bit.",
+            ephemeral=True,
+        )
+        return
+    await _mod_reply(interaction, f"{past[action]} {target.mention}: {reason}")
 
 
 # --- Ticket center -----------------------------------------------------------
