@@ -1242,7 +1242,6 @@ async def _handle_swear(message: discord.Message) -> None:
     _swear_strikes[key] = strikes
     try:
         if strikes >= 3:
-            _swear_strikes[key] = 0
             try:
                 await message.guild.ban(message.author, reason=_SWEAR_BAN_REASON)
             except (discord.Forbidden, discord.HTTPException):
@@ -1251,6 +1250,7 @@ async def _handle_swear(message: discord.Message) -> None:
                     "swearing, but I don't have permission to ban them."
                 )
                 return
+            _swear_strikes[key] = 0
             await message.channel.send(
                 f"{message.author.mention} has been banned for repeated swearing."
             )
