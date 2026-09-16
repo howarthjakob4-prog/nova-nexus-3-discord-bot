@@ -12,7 +12,6 @@ import os
 import re
 import time
 import urllib.request
-import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 import discord
@@ -1421,9 +1420,11 @@ def _wikipedia_answer(query: str) -> str | None:
 
     Free, no API key. Returns None when nothing useful is found.
     """
+    from urllib.parse import quote
+
     try:
         search_req = urllib.request.Request(
-            _WIKI_SEARCH_URL + urllib.parse.quote(query),
+            _WIKI_SEARCH_URL + quote(query),
             headers={"User-Agent": "NovaNexus3Bot/1.0"},
         )
         with urllib.request.urlopen(search_req, timeout=8) as resp:
@@ -1433,7 +1434,7 @@ def _wikipedia_answer(query: str) -> str | None:
             return None
         title = results[0]["title"]
         page_req = urllib.request.Request(
-            _WIKI_PAGE_URL + urllib.parse.quote(title),
+            _WIKI_PAGE_URL + quote(title),
             headers={"User-Agent": "NovaNexus3Bot/1.0"},
         )
         with urllib.request.urlopen(page_req, timeout=8) as resp:
