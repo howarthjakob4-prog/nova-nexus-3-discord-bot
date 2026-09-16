@@ -374,7 +374,10 @@ async def engine_cmd(interaction: discord.Interaction):
 async def ask_cmd(interaction: discord.Interaction, question: str):
     answer = None
     if interaction.guild is not None and await _guild_is_premium(interaction.guild):
-        answer = await asyncio.to_thread(_kb_answer, interaction.guild.id, question)
+        try:
+            answer = await asyncio.to_thread(_kb_answer, interaction.guild.id, question)
+        except Exception:  # noqa: BLE001 -- transient GitHub failure: engine FAQ fallback
+            answer = None
     await interaction.response.send_message(answer or answer_question(question) or _ASK_FALLBACK)
 
 
@@ -1301,7 +1304,10 @@ async def _handle_chat(message: discord.Message) -> None:
         return
     kb_answer = None
     if message.guild is not None and await _guild_is_premium(message.guild):
-        kb_answer = await asyncio.to_thread(_kb_answer, message.guild.id, content)
+        try:
+            kb_answer = await asyncio.to_thread(_kb_answer, message.guild.id, content)
+        except Exception:  # noqa: BLE001 -- transient GitHub failure: engine FAQ fallback
+            kb_answer = None
     await message.reply(kb_answer or answer_question(content) or _ASK_FALLBACK)
 
 
@@ -1360,22 +1366,33 @@ def _premium_repo_path() -> str:
 
 
 def _premium_read(path: str, default):
-    """Read a JSON file from the bot repo (cached 60s). Blocking: run in a thread."""
+    """Read a JSON file from the bot repo (cached 60s). Blocking: run in a thread.
+
+    Only a confirmed 404 (file not created yet) yields `default`. Any other
+    failure raises RuntimeError so callers abort the mutation instead of
+    mistaking a transient GitHub outage for an empty file — the empty
+    default is never cached over real data.
+    """
     import base64 as _b64
 
     now = time.monotonic()
     hit = _premium_cache.get(path)
     if hit is not None and now - hit[0] < _PREMIUM_CACHE_TTL_S:
         return hit[1]
-    data = default
-    if _RULES_TOKEN:
-        try:
-            file = _github_api(
-                "GET", _premium_repo_path() + "/contents/" + path, _RULES_TOKEN
-            )
-            data = json.loads(_b64.b64decode(file["content"]).decode())
-        except Exception:  # noqa: BLE001 -- missing file, bad json, api error
+    if not _RULES_TOKEN:
+        return default
+    try:
+        file = _github_api(
+            "GET", _premium_repo_path() + "/contents/" + path, _RULES_TOKEN
+        )
+        data = json.loads(_b64.b64decode(file["content"]).decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
             data = default
+        else:
+            raise RuntimeError(f"GitHub read failed for {path}: HTTP {e.code}")
+    except Exception as e:  # noqa: BLE001 -- network, JSON, or shape errors
+        raise RuntimeError(f"GitHub read failed for {path}: {e}")
     _premium_cache[path] = (now, data)
     return data
 
@@ -1404,7 +1421,10 @@ def _premium_write(path: str, obj) -> None:
 
 
 def _premium_guild_ids() -> set[int]:
-    data = _premium_read("premium/guilds.json", {"guild_ids": []})
+    try:
+        data = _premium_read("premium/guilds.json", {"guild_ids": []})
+    except Exception:  # noqa: BLE001 -- transient GitHub failure: fail closed
+        return set()
     try:
         return {int(g) for g in data.get("guild_ids", [])}
     except (TypeError, ValueError, AttributeError):
@@ -1691,10 +1711,16 @@ async def knowledge_list_cmd(interaction: discord.Interaction):
         )
         return
     lines = []
+    used = 0
     for e in entries[:25]:
-        if isinstance(e, dict):
-            q = str(e.get("q", ""))[:80]
-            lines.append(f"#{e.get('id')}: {q}")
+        if not isinstance(e, dict):
+            continue
+        line = f"#{e.get('id')}: {str(e.get('q', ''))[:80]}"
+        if used + len(line) + 1 > 1900:
+            lines.append(f"(+{len(entries) - len(lines)} more not shown)")
+            break
+        lines.append(line)
+        used += len(line) + 1
     await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 
@@ -1817,9 +1843,9 @@ bot.tree.add_command(customcmd_group)
 
 async def _handle_customcmd(message: discord.Message) -> bool:
     """Fire a premium custom !command. Returns True when one fired."""
-    guild = message.guild
-    if guild is None or not await _guild_is_premium(guild):
-        return False
+    # Parse the !prefix first: this runs on every guild message, and the
+    # premium lookup below hits the network (or at least a thread hop), so
+    # bail out before it when no command was even attempted.
     text = (message.content or "").strip()
     if not text.startswith("!"):
         return False
@@ -1828,6 +1854,9 @@ async def _handle_customcmd(message: discord.Message) -> bool:
         return False
     name = rest[0].lower().rstrip("!?,.")
     if not _CCMD_NAME_RE.match(name):
+        return False
+    guild = message.guild
+    if guild is None or not await _guild_is_premium(guild):
         return False
     cmds = await asyncio.to_thread(_ccmds, guild.id)
     response = cmds.get(name)
@@ -1847,6 +1876,10 @@ async def _handle_customcmd(message: discord.Message) -> bool:
 _SCHED_MAX = 20
 _SCHED_MAX_MSG = 1000
 _SCHED_OVERDUE_GRACE_S = 6 * 3600
+# In-run idempotency for scheduled announcements: (guild_id, schedule id,
+# original fire time) triples already delivered. Stops a schedule being
+# re-sent every 60s when the GitHub write that would clear it keeps failing.
+_sched_delivered: set[tuple[int, int, object]] = set()
 _WHEN_REL_RE = re.compile(r"^in\s+(\d+)\s*([mhdw])$", re.IGNORECASE)
 _WHEN_AT_RE = re.compile(r"^at\s+(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$")
 
@@ -1904,10 +1937,16 @@ def _due_schedules(
         due.append(s)
         repeat = s.get("repeat", "none")
         if repeat == "daily":
-            s["at"] = (at + timedelta(days=1)).isoformat()
+            # Advance past now so missed occurrences are skipped instead of
+            # each firing a minute apart on the following runner passes.
+            while at <= now:
+                at += timedelta(days=1)
+            s["at"] = at.isoformat()
             keep.append(s)
         elif repeat == "weekly":
-            s["at"] = (at + timedelta(weeks=1)).isoformat()
+            while at <= now:
+                at += timedelta(weeks=1)
+            s["at"] = at.isoformat()
             keep.append(s)
         # one-time: dropped
     return due, keep
@@ -2068,8 +2107,15 @@ async def _schedule_runner():
             scheds = await asyncio.to_thread(_schedules, guild.id)
         except Exception:  # noqa: BLE001
             continue
+        # Snapshot each schedule's original fire time: _due_schedules advances
+        # repeats in place, and the (guild, id, original at) triple identifies
+        # one delivery occurrence for the idempotency set below.
+        orig_at = {id(s): s.get("at") for s in scheds if isinstance(s, dict)}
         due, keep = _due_schedules(scheds, now)
         for s in due:
+            key = (guild.id, s.get("id"), orig_at.get(id(s)))
+            if key in _sched_delivered:
+                continue  # sent already; the GitHub write failed last pass
             try:
                 at = datetime.fromisoformat(s["at"])
             except (ValueError, KeyError, TypeError):
@@ -2082,14 +2128,22 @@ async def _schedule_runner():
                 try:
                     await channel.send(str(s.get("message", ""))[:2000])
                 except (discord.HTTPException, discord.Forbidden):
-                    pass
+                    continue
+                _sched_delivered.add(key)
         if due:
             try:
                 await asyncio.to_thread(
                     _premium_write, _sched_path(guild.id), {"schedules": keep}
                 )
             except Exception:  # noqa: BLE001
-                pass
+                # Write failed: the remote file still shows these as due, but
+                # _sched_delivered stops them being re-sent every 60 seconds.
+                # The write is retried on the next pass.
+                continue
+            for s in due:
+                _sched_delivered.discard(
+                    (guild.id, s.get("id"), orig_at.get(id(s)))
+                )
 
 
 @_schedule_runner.before_loop
