@@ -1732,6 +1732,50 @@ async def premium_status_cmd(interaction: discord.Interaction):
         )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@premium_group.command(name="plans", description="See premium pricing and features.")
+async def premium_plans_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="Nova Nexus 3 \u2014 Premium",
+        description=(
+            "One upgrade for your whole server: **$200**.\n"
+            "Free commands stay free forever."
+        ),
+        color=0xF5C518,
+    )
+    embed.add_field(
+        name="Available now",
+        value=(
+            "\u2022 **Custom AI knowledge** \u2014 /knowledge add: "
+            "teach the bot your server's own FAQ.\n"
+            "\u2022 **Custom commands** \u2014 /customcmd add: "
+            "your own !commands.\n"
+            "\u2022 **Scheduled announcements** \u2014 /schedule add: "
+            "posts on a timer."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Ideas in the works",
+        value=(
+            "Custom welcome messages \u2022 Reaction roles \u2022 "
+            "Polls & giveaways \u2022 Leveling & XP \u2022 "
+            "Moderation tuning \u2022 Server analytics"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="How to upgrade",
+        value=(
+            "Ask the bot owner to enable premium for your server.\n"
+            "See everything, plus the latest ideas, on the status page: "
+            "https://lovely-licorice-d2d058.netlify.app/#premium"
+        ),
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+
 
 @premium_group.command(
     name="grant", description="Enable premium for a server (bot owner only)."
