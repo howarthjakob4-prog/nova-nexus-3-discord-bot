@@ -1,3 +1,14 @@
+> ## Self-Hosting Rules — read this first
+
+You are welcome to use this repository's code to run your own copy of the bot, but:
+
+- **Change the bot's name.** You may not run your copy as "Nova Nexus 3 Engine" — pick your own name.
+- **Use your own Discord bot token.** You may never use the owner's bot token.
+- **Follow the platform rules.** You must also follow GitHub's Terms of Service and policies, and Discord's Terms of Service and Developer Policies for bots.
+
+Full terms: [Terms of Service](https://muse.ai/s/terms-of-service-xsxr5xql92lvxjy) · [Privacy Policy](https://muse.ai/s/privacy-policy-xxxc5xql9xuxidpv)
+
+---
 # Nova Nexus 3 Engine Discord Bot
 
 **Nova, Nexus, 3 engine.** — the community bot for the Nova Nexus 3 engine.
