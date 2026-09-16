@@ -1,5 +1,16 @@
 name: Nova Nexus 3 Engine Bot
 
+# No-overlap guard: only one run executes at a time. A newly queued run
+# WAITS for the active run to finish instead of cancelling it, so the
+# healthy bot is never killed before its replacement is ready.
+# (cancel-in-progress is intentionally off: killing the active run up-front
+# would take the bot offline if the replacement fails during runner,
+# Python, or dependency setup.)
+# Need an immediate restart? Cancel the active run first, then dispatch.
+concurrency:
+  group: nova-nexus-bot-singleton
+
+
 # Always-on: a fresh run starts every 5 hours (each run is capped at 6h by
 # GitHub). The new run's identify cleanly takes over the token from the
 # previous run, which exits instead of fighting (NOVA_RECONNECT=0).
