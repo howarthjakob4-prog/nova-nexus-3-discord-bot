@@ -285,6 +285,19 @@ async def on_ready():
     except Exception as e:  # noqa: BLE001
         print(f"[nova-nexus] profile bio update failed: {e}")
 
+    # Server widget: lets the public status page read this bot's live
+    # Discord presence straight from Discord (widget.json). The widget
+    # stays enabled once set, so this is a one-time flip per server.
+    for guild in bot.guilds:
+        try:
+            route = discord.http.Route(
+                "PATCH", "/guilds/{guild_id}/widget", guild_id=guild.id
+            )
+            await bot.http.request(route, json={"enabled": True})
+            print(f"[nova-nexus] server widget enabled for {guild.name} ({guild.id})")
+        except Exception as e:  # noqa: BLE001
+            print(f"[nova-nexus] widget enable failed for {guild.id}: {e}")
+
     # Premium scheduled announcements.
     if not _schedule_runner.is_running():
         _schedule_runner.start()
