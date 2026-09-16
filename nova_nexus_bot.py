@@ -1391,30 +1391,112 @@ async def _handle_swear(message: discord.Message) -> None:
 _DM_GREETINGS = {"hi", "hello", "hey", "yo", "sup", "hiya", "howdy", "greetings"}
 _DM_MORNING = ("good morning", "good evening", "good afternoon")
 
+# Words that signal a DM question is about Nova Nexus 3 or the server.
+# The FAQ matcher uses broad substring keywords ("role", "when", "game",
+# ...), so it is only consulted when the message shows Nova context —
+# otherwise a general question like "what is the role of mitochondria?"
+# would get the server-roles answer instead of the Wikipedia fallback.
+_NOVA_CONTEXT_WORDS = {
+    "nova", "nexus", "engine", "server", "discord",
+    "ticket", "moderator", "appeal", "holo", "beyblade",
+    "valtriac", "avior", "wicked", "unreal", "ue5",
+    "studio", "trailer", "cinematic", "fleet", "overlord",
+    "frontier", "github", "repo", "ultron",
+}
+
+
+_WIKI_SEARCH_URL = (
+    "https://en.wikipedia.org/w/api.php?action=query&list=search"
+    "&srlimit=1&format=json&srsearch="
+)
+_WIKI_PAGE_URL = (
+    "https://en.wikipedia.org/w/api.php?action=query&prop=extracts"
+    "&exintro&explaintext&format=json&titles="
+)
+
+
+def _wikipedia_answer(query: str) -> str | None:
+    """One-paragraph Wikipedia answer for general questions.
+
+    Free, no API key. Returns None when nothing useful is found.
+    """
+    from urllib.parse import quote
+
+    try:
+        search_req = urllib.request.Request(
+            _WIKI_SEARCH_URL + quote(query),
+            headers={"User-Agent": "NovaNexus3Bot/1.0"},
+        )
+        with urllib.request.urlopen(search_req, timeout=8) as resp:
+            data = json.load(resp)
+        results = data.get("query", {}).get("search", [])
+        if not results:
+            return None
+        title = results[0]["title"]
+        page_req = urllib.request.Request(
+            _WIKI_PAGE_URL + quote(title),
+            headers={"User-Agent": "NovaNexus3Bot/1.0"},
+        )
+        with urllib.request.urlopen(page_req, timeout=8) as resp:
+            data = json.load(resp)
+        pages = data.get("query", {}).get("pages", {})
+        for page in pages.values():
+            extract = (page.get("extract") or "").strip()
+            if not extract or "may refer to:" in extract[:300]:
+                continue
+            sentences = re.split(r"(?<=[.!?])\s+", extract)
+            short = " ".join(sentences[:3]).strip()
+            if len(short) > 600:
+                short = short[:597].rstrip() + "..."
+            return f"According to Wikipedia — **{title}**: {short}"
+        return None
+    except Exception:
+        return None
+
 
 async def _handle_dm(message: discord.Message):
-    """Simple conversational replies in direct messages."""
-    text = (message.content or "").strip().lower()
+    """Conversational replies in direct messages.
+
+    Greetings stay friendly; engine/server questions use the built-in
+    knowledge base; anything else gets a free Wikipedia answer, so the
+    bot can talk about general topics too.
+    """
+    text = (message.content or "").strip()
     if not text:
         return
     name = message.author.display_name
-    words = set(re.findall(r"[a-z']+", text))
+    lowered = text.lower()
+    words = set(re.findall(r"[a-z']+", lowered))
     try:
-        if words & _DM_GREETINGS or text.startswith(_DM_MORNING):
+        if words & _DM_GREETINGS or lowered.startswith(_DM_MORNING):
             await message.channel.send(f"How can I help you, {name}?")
-        elif "thank" in text:
+            return
+        if "thank" in lowered:
             await message.channel.send("You're welcome!")
-        elif words & {"bye", "goodbye", "goodnight"} or "good night" in text:
+            return
+        if words & {"bye", "goodbye", "goodnight"} or "good night" in lowered:
             await message.channel.send(f"Goodbye, {name}! Come back anytime.")
-        elif "help" in text:
+            return
+        if "help" in lowered:
             await message.channel.send(
-                "Try /help to see what I can do, or ask me about the Nova Nexus 3 Engine."
+                "Try /help to see what I can do, or just ask me a question — "
+                "about the Nova Nexus 3 engine, the server, or anything else."
             )
-        else:
-            await message.channel.send(
-                "I'm the Nova Nexus 3 Engine bot. "
-                "Ask me about the engine, or try /help."
-            )
+            return
+        answer = None
+        if words & _NOVA_CONTEXT_WORDS:
+            answer = answer_question(text)
+        if answer:
+            await message.channel.send(answer)
+            return
+        wiki = await asyncio.to_thread(_wikipedia_answer, text)
+        if wiki:
+            await message.channel.send(wiki)
+            return
+        await message.channel.send(
+            "I couldn't find an answer for that. "
+            "Try asking about the Nova Nexus 3 engine, or /help in the server."
+        )
     except discord.HTTPException:
         pass
 
