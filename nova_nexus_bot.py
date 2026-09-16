@@ -250,17 +250,17 @@ async def on_ready():
             type=discord.ActivityType.watching, name="Nova Nexus 3 Engine"
         )
     )
-    # The Commands list on the bot's profile only shows *global* commands,
-    # so always sync them globally. The guild sync stays for instant
-    # updates inside the home server.
+    # Register slash commands globally ONLY. The bot used to also copy
+    # every command to the home server (guild sync), which made each
+    # command appear TWICE in Discord. On every startup, wipe any
+    # guild-registered copies so only the single global registration
+    # remains. Idempotent and safe when there is nothing to clear.
     try:
-        if GUILD_ID:
-            guild = discord.Object(id=int(GUILD_ID))
-            bot.tree.copy_global_to(guild=guild)
-            synced_guild = await bot.tree.sync(guild=guild)
-            print(f"[nova-nexus] synced {len(synced_guild)} guild commands")
+        for guild in bot.guilds:
+            bot.tree.clear_commands(guild=guild)
+            await bot.tree.sync(guild=guild)
         synced = await bot.tree.sync()
-        print(f"[nova-nexus] online as {bot.user} — synced {len(synced)} global commands")
+        print(f"[nova-nexus] online as {bot.user} — synced {len(synced)} global commands, guild copies cleared")
     except Exception as e:  # noqa: BLE001
         print(f"[nova-nexus] command sync failed: {e}")
 
