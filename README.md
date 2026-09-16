@@ -2,7 +2,7 @@
 
 You are welcome to use this repository's code to run your own copy of the bot, but:
 
-- **Change the bot's name.** You may not run your copy as "Nova Nexus Engine 3" — pick your own name.
+- **Change the bot's name.** You may not run your copy as "Nova Nexus 3 Engine" — pick your own name.
 - **Use your own Discord bot token.** You may never use the owner's bot token.
 - **Follow the platform rules.** You must also follow GitHub's Terms of Service and policies, and Discord's Terms of Service and Developer Policies for bots.
 
