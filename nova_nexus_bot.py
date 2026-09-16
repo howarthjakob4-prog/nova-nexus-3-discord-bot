@@ -13,7 +13,7 @@ import re
 import time
 import urllib.request
 import urllib.parse
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord.ext import commands, tasks
@@ -286,6 +286,10 @@ async def on_ready():
     except Exception as e:  # noqa: BLE001
         print(f"[nova-nexus] profile bio update failed: {e}")
 
+    # Premium scheduled announcements.
+    if not _schedule_runner.is_running():
+        _schedule_runner.start()
+
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -340,6 +344,16 @@ async def help_cmd(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
+        name="Premium",
+        value=(
+            "/premium status — is premium on here?\n"
+            "/knowledge add — teach me your server's FAQ\n"
+            "/customcmd add — your own !commands\n"
+            "/schedule add — announcements on a timer"
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="Chat with me",
         value="Mention me or reply to me in any channel and I'll answer engine questions.",
         inline=False,
@@ -359,7 +373,13 @@ async def engine_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name="ask", description="Ask anything about the Nova Nexus 3 engine.")
 async def ask_cmd(interaction: discord.Interaction, question: str):
-    await interaction.response.send_message(answer_question(question) or _ASK_FALLBACK)
+    answer = None
+    if interaction.guild is not None and await _guild_is_premium(interaction.guild):
+        try:
+            answer = await asyncio.to_thread(_kb_answer, interaction.guild.id, question)
+        except Exception:  # noqa: BLE001 -- transient GitHub failure: engine FAQ fallback
+            answer = None
+    await interaction.response.send_message(answer or answer_question(question) or _ASK_FALLBACK)
 
 
 @bot.tree.command(name="rules", description="Community rules.")
@@ -1199,9 +1219,11 @@ async def on_app_command_error(
         pass
 
 
-# No-swearing rule: if a message contains profanity, the bot replies
-# "Please do not swear." One warning per user per minute so it can't
-# be used to spam the channel.
+# No-swearing rule: repeated profanity escalates from a warning to a ban.
+# Strike 1: "Please do not swear." Strike 2: final warning that another
+# offense means a ban. Strike 3: the user is banned. Warning texts are
+# sent at most once per user per minute so they can't be used to spam
+# the channel.
 _PROFANITY = re.compile(
     r"\b("
     r"fuck(?:er|ing|ed|s)?|motherfucker|"
@@ -1221,6 +1243,53 @@ _PROFANITY = re.compile(
 )
 _swear_warned_at: dict[int, float] = {}
 _SWEAR_COOLDOWN_S = 60.0
+# (guild_id, user_id) -> profanity strike count for the current bot run.
+_swear_strikes: dict[tuple[int, int], int] = {}
+_SWEAR_BAN_REASON = "Repeated swearing after warnings from the Nova Nexus 3 bot."
+
+
+async def _handle_swear(message: discord.Message) -> None:
+    """Delete a profane message and escalate the author's strike count.
+
+    Strike 1 warns, strike 2 warns that the next offense means a ban,
+    and strike 3 bans the user from the server.
+    """
+    try:
+        await message.delete()
+    except discord.HTTPException:
+        pass
+    key = (message.guild.id, message.author.id)
+    strikes = _swear_strikes.get(key, 0) + 1
+    _swear_strikes[key] = strikes
+    try:
+        if strikes >= 3:
+            try:
+                await message.guild.ban(message.author, reason=_SWEAR_BAN_REASON)
+            except (discord.Forbidden, discord.HTTPException):
+                await message.channel.send(
+                    f"{message.author.mention} would be banned for repeated "
+                    "swearing, but I don't have permission to ban them."
+                )
+                return
+            _swear_strikes[key] = 0
+            await message.channel.send(
+                f"{message.author.mention} has been banned for repeated swearing."
+            )
+            return
+        now = time.monotonic()
+        last = _swear_warned_at.get(message.author.id, 0.0)
+        if now - last < _SWEAR_COOLDOWN_S:
+            return
+        _swear_warned_at[message.author.id] = now
+        if strikes == 1:
+            await message.channel.send("Please do not swear.")
+        else:
+            await message.channel.send(
+                f"{message.author.mention}, if you swear again, "
+                "you will be banned."
+            )
+    except discord.HTTPException:
+        pass
 
 _DM_GREETINGS = {"hi", "hello", "hey", "yo", "sup", "hiya", "howdy", "greetings"}
 _DM_MORNING = ("good morning", "good evening", "good afternoon")
@@ -1363,7 +1432,13 @@ async def _handle_chat(message: discord.Message) -> None:
             "Hey — ask me something about the **Nova Nexus 3 engine**."
         )
         return
-    await message.reply(answer_question(content) or _ASK_FALLBACK)
+    kb_answer = None
+    if message.guild is not None and await _guild_is_premium(message.guild):
+        try:
+            kb_answer = await asyncio.to_thread(_kb_answer, message.guild.id, content)
+        except Exception:  # noqa: BLE001 -- transient GitHub failure: engine FAQ fallback
+            kb_answer = None
+    await message.reply(kb_answer or answer_question(content) or _ASK_FALLBACK)
 
 
 @bot.event
@@ -1374,23 +1449,825 @@ async def on_message(message: discord.Message):
     if message.guild is None:
         await _handle_dm(message)
     elif _PROFANITY.search(message.content or ""):
-        try:
-            await message.delete()
-        except discord.HTTPException:
-            pass
-        now = time.monotonic()
-        last = _swear_warned_at.get(message.author.id, 0.0)
-        if now - last >= _SWEAR_COOLDOWN_S:
-            _swear_warned_at[message.author.id] = now
-            try:
-                await message.channel.send("Please do not swear.")
-            except discord.HTTPException:
-                pass
+        await _handle_swear(message)
     elif _is_ticket_channel(message.channel):
         await _handle_ticket_message(message)
+    elif await _handle_customcmd(message):
+        pass  # a premium custom !command fired
     elif _talking_to_bot(message):
         await _handle_chat(message)
     await bot.process_commands(message)
+
+
+# --- Premium pack ------------------------------------------------------------
+# Premium NEVER removes free features: every premium command first checks
+# the guild's premium status and bows out with an upgrade note when the
+# server isn't premium. Premium data (guild list, knowledge bases, custom
+# commands, schedules) lives as JSON files in this repo under premium/, so
+# it survives the ephemeral Actions runners.
+
+_BOT_REPO_OWNER = "howarthjakob4-prog"
+_BOT_REPO = "nova-nexus-3-discord-bot"
+
+_PREMIUM_UPGRADE_MSG = (
+    "That's a premium feature — this server isn't premium yet. Premium is "
+    "$200 and adds custom AI knowledge, custom commands, and scheduled "
+    "announcements. The free commands stay free forever. "
+    "Ask the bot owner about upgrading."
+)
+
+_premium_cache: dict[str, tuple[float, object]] = {}
+_PREMIUM_CACHE_TTL_S = 60.0
+
+
+def _premium_repo_path() -> str:
+    return f"/repos/{_BOT_REPO_OWNER}/{_BOT_REPO}"
+
+
+def _premium_read(path: str, default):
+    """Read a JSON file from the bot repo (cached 60s). Blocking: run in a thread.
+
+    Only a confirmed 404 (file not created yet) yields `default`. Any other
+    failure raises RuntimeError so callers abort the mutation instead of
+    mistaking a transient GitHub outage for an empty file — the empty
+    default is never cached over real data.
+    """
+    import base64 as _b64
+
+    now = time.monotonic()
+    hit = _premium_cache.get(path)
+    if hit is not None and now - hit[0] < _PREMIUM_CACHE_TTL_S:
+        return hit[1]
+    if not _RULES_TOKEN:
+        return default
+    try:
+        file = _github_api(
+            "GET", _premium_repo_path() + "/contents/" + path, _RULES_TOKEN
+        )
+        data = json.loads(_b64.b64decode(file["content"]).decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            data = default
+        else:
+            raise RuntimeError(f"GitHub read failed for {path}: HTTP {e.code}")
+    except Exception as e:  # noqa: BLE001 -- network, JSON, or shape errors
+        raise RuntimeError(f"GitHub read failed for {path}: {e}")
+    _premium_cache[path] = (now, data)
+    return data
+
+
+def _premium_write(path: str, obj) -> None:
+    """Write a JSON file to the bot repo and refresh the cache. Blocking: run in a thread."""
+    import base64 as _b64
+
+    if not _RULES_TOKEN:
+        raise RuntimeError("no GitHub token available")
+    payload = {
+        "message": f"premium data: {path}",
+        "content": _b64.b64encode(json.dumps(obj, indent=2).encode()).decode(),
+    }
+    try:
+        existing = _github_api(
+            "GET", _premium_repo_path() + "/contents/" + path, _RULES_TOKEN
+        )
+        if isinstance(existing, dict) and existing.get("sha"):
+            payload["sha"] = existing["sha"]
+    except urllib.error.HTTPError as e:
+        if e.code != 404:  # 404 = first write, nothing to update
+            raise
+    _github_api("PUT", _premium_repo_path() + "/contents/" + path, _RULES_TOKEN, payload)
+    _premium_cache[path] = (time.monotonic(), obj)
+
+
+def _premium_guild_ids() -> set[int]:
+    try:
+        data = _premium_read("premium/guilds.json", {"guild_ids": []})
+    except Exception:  # noqa: BLE001 -- transient GitHub failure: fail closed
+        return set()
+    try:
+        return {int(g) for g in data.get("guild_ids", [])}
+    except (TypeError, ValueError, AttributeError):
+        return set()
+
+
+async def _guild_is_premium(guild) -> bool:
+    """Async premium check (GitHub read runs in a thread, cached 60s)."""
+    if guild is None:
+        return False
+    return guild.id in await asyncio.to_thread(_premium_guild_ids)
+
+
+async def _premium_guild_or_note(interaction: discord.Interaction):
+    """Return the guild when it's premium; otherwise send the upgrade note."""
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Run this inside a server.", ephemeral=True
+        )
+        return None
+    if not await _guild_is_premium(guild):
+        await interaction.response.send_message(_PREMIUM_UPGRADE_MSG, ephemeral=True)
+        return None
+    return guild
+
+
+premium_group = app_commands.Group(
+    name="premium", description="Premium status and management."
+)
+
+
+@premium_group.command(name="status", description="Check this server's premium status.")
+async def premium_status_cmd(interaction: discord.Interaction):
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message(
+            "Run this inside a server.", ephemeral=True
+        )
+        return
+    premium = await _guild_is_premium(guild)
+    embed = discord.Embed(
+        title="Premium",
+        description=(
+            "Premium is **active** on this server."
+            if premium
+            else "Premium is **not active** on this server."
+        ),
+        color=0xF5C518,
+    )
+    embed.add_field(
+        name="Custom AI knowledge",
+        value="/knowledge add — teach me your server's own FAQ.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Custom commands",
+        value="/customcmd add — your own !commands.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Scheduled announcements",
+        value="/schedule add — announcements on a timer.",
+        inline=False,
+    )
+    if not premium:
+        embed.add_field(
+            name="How to upgrade",
+            value=(
+                "Premium is $200 — ask the bot owner to enable it for this "
+                "server. Free commands stay free forever."
+            ),
+            inline=False,
+        )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@premium_group.command(
+    name="grant", description="Enable premium for a server (bot owner only)."
+)
+async def premium_grant_cmd(interaction: discord.Interaction, guild_id: str):
+    if not await bot.is_owner(interaction.user):
+        await interaction.response.send_message(
+            "Only the bot owner can do that.", ephemeral=True
+        )
+        return
+    try:
+        gid = int(guild_id)
+    except ValueError:
+        await interaction.response.send_message(
+            "Give me a numeric server ID.", ephemeral=True
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        data = await asyncio.to_thread(
+            _premium_read, "premium/guilds.json", {"guild_ids": []}
+        )
+        ids = []
+        for g in data.get("guild_ids", []):
+            try:
+                ids.append(int(g))
+            except (TypeError, ValueError):
+                pass
+        if gid not in ids:
+            ids.append(gid)
+            await asyncio.to_thread(
+                _premium_write, "premium/guilds.json", {"guild_ids": ids}
+            )
+        await interaction.followup.send(
+            f"Premium enabled for server `{gid}`.", ephemeral=True
+        )
+    except (RuntimeError, urllib.error.HTTPError) as e:
+        await interaction.followup.send(f"Couldn't save that: {e}", ephemeral=True)
+
+
+@premium_group.command(
+    name="revoke", description="Disable premium for a server (bot owner only)."
+)
+async def premium_revoke_cmd(interaction: discord.Interaction, guild_id: str):
+    if not await bot.is_owner(interaction.user):
+        await interaction.response.send_message(
+            "Only the bot owner can do that.", ephemeral=True
+        )
+        return
+    try:
+        gid = int(guild_id)
+    except ValueError:
+        await interaction.response.send_message(
+            "Give me a numeric server ID.", ephemeral=True
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        data = await asyncio.to_thread(
+            _premium_read, "premium/guilds.json", {"guild_ids": []}
+        )
+        ids = []
+        for g in data.get("guild_ids", []):
+            try:
+                ids.append(int(g))
+            except (TypeError, ValueError):
+                pass
+        if gid in ids:
+            ids.remove(gid)
+            await asyncio.to_thread(
+                _premium_write, "premium/guilds.json", {"guild_ids": ids}
+            )
+        await interaction.followup.send(
+            f"Premium disabled for server `{gid}`.", ephemeral=True
+        )
+    except (RuntimeError, urllib.error.HTTPError) as e:
+        await interaction.followup.send(f"Couldn't save that: {e}", ephemeral=True)
+
+
+bot.tree.add_command(premium_group)
+
+
+# --- Premium: custom AI knowledge --------------------------------------------
+# Premium servers can teach the bot their own FAQ. The chat brain checks the
+# guild's knowledge base first and falls back to the engine FAQ.
+
+_KB_MAX_ENTRIES = 50
+_KB_MAX_Q = 200
+_KB_MAX_A = 1000
+_KB_GENERIC_WORDS = frozenset(
+    {
+        "what", "when", "where", "which", "who", "whom", "whose", "how",
+        "is", "are", "was", "were", "the", "a", "an", "of", "to", "for",
+        "in", "on", "do", "does", "did", "can", "should",
+    }
+)
+
+
+def _kb_path(guild_id: int) -> str:
+    return f"premium/knowledge/{guild_id}.json"
+
+
+def _kb_entries(guild_id: int) -> list:
+    """Blocking: run in a thread."""
+    data = _premium_read(_kb_path(guild_id), {"entries": []})
+    entries = data.get("entries", [])
+    return entries if isinstance(entries, list) else []
+
+
+def _kb_answer(guild_id: int, question: str) -> str | None:
+    """Best guild-knowledge answer, or None. Blocking: run in a thread."""
+    q = question.lower()
+    best, best_hits = None, 0
+    for entry in _kb_entries(guild_id):
+        if not isinstance(entry, dict):
+            continue
+        eq, ea = entry.get("q", ""), entry.get("a", "")
+        if not eq or not ea:
+            continue
+        words = {w for w in re.findall(r"[a-z']+", eq.lower()) if len(w) > 3}
+        hits = sum(1 for w in words if w in q)
+        specific = sum(1 for w in words if w in q and w not in _KB_GENERIC_WORDS)
+        if hits > best_hits and specific >= 1:
+            best, best_hits = ea, hits
+    return best
+
+
+knowledge_group = app_commands.Group(
+    name="knowledge", description="Teach the bot your server's own FAQ (premium)."
+)
+
+
+@knowledge_group.command(
+    name="add", description="Teach the bot a question + answer (mods, premium)."
+)
+@_manage_server()
+async def knowledge_add_cmd(
+    interaction: discord.Interaction, question: str, answer: str
+):
+    guild = await _premium_guild_or_note(interaction)
+    if guild is None:
+        return
+    if len(question) > _KB_MAX_Q or len(answer) > _KB_MAX_A:
+        await interaction.response.send_message(
+            f"Keep the question under {_KB_MAX_Q} characters and the answer "
+            f"under {_KB_MAX_A}.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        entries = await asyncio.to_thread(_kb_entries, guild.id)
+        if len(entries) >= _KB_MAX_ENTRIES:
+            await interaction.followup.send(
+                f"This server's knowledge base is full ({_KB_MAX_ENTRIES} "
+                "entries). Remove one first.",
+                ephemeral=True,
+            )
+            return
+        new_id = max([e.get("id", 0) for e in entries if isinstance(e, dict)] + [0]) + 1
+        entries.append({"id": new_id, "q": question.strip(), "a": answer.strip()})
+        await asyncio.to_thread(
+            _premium_write, _kb_path(guild.id), {"entries": entries}
+        )
+        await interaction.followup.send(
+            f"Learned! I'll answer that as entry #{new_id}.", ephemeral=True
+        )
+    except (RuntimeError, urllib.error.HTTPError) as e:
+        await interaction.followup.send(f"Couldn't save that: {e}", ephemeral=True)
+
+
+@knowledge_group.command(
+    name="remove", description="Forget a knowledge entry by id (mods, premium)."
+)
+@_manage_server()
+async def knowledge_remove_cmd(interaction: discord.Interaction, id: int):
+    guild = await _premium_guild_or_note(interaction)
+    if guild is None:
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        entries = await asyncio.to_thread(_kb_entries, guild.id)
+        kept = [e for e in entries if not (isinstance(e, dict) and e.get("id") == id)]
+        if len(kept) == len(entries):
+            await interaction.followup.send(
+                f"No entry #{id} here.", ephemeral=True
+            )
+            return
+        await asyncio.to_thread(_premium_write, _kb_path(guild.id), {"entries": kept})
+        await interaction.followup.send(f"Forgot entry #{id}.", ephemeral=True)
+    except (RuntimeError, urllib.error.HTTPError) as e:
+        await interaction.followup.send(f"Couldn't save that: {e}", ephemeral=True)
+
+
+@knowledge_group.command(
+    name="list", description="Show this server's knowledge entries (mods, premium)."
+)
+@_manage_server()
+async def knowledge_list_cmd(interaction: discord.Interaction):
+    guild = await _premium_guild_or_note(interaction)
+    if guild is None:
+        return
+    await interaction.response.defer(ephemeral=True)
+    entries = await asyncio.to_thread(_kb_entries, guild.id)
+    if not entries:
+        await interaction.followup.send(
+            "Nothing taught yet. Use /knowledge add to teach me.", ephemeral=True
+        )
+        return
+    lines = []
+    used = 0
+    for e in entries[:25]:
+        if not isinstance(e, dict):
+            continue
+        line = f"#{e.get('id')}: {str(e.get('q', ''))[:80]}"
+        if used + len(line) + 1 > 1900:
+            lines.append(f"(+{len(entries) - len(lines)} more not shown)")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
+bot.tree.add_command(knowledge_group)
+
+
+# --- Premium: custom commands --------------------------------------------------
+# Premium servers get their own !commands with custom replies.
+
+_CCMD_MAX = 25
+_CCMD_MAX_RESPONSE = 1000
+_CCMD_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$")
+_CCMD_RESERVED = frozenset({"help"})
+
+
+def _ccmd_path(guild_id: int) -> str:
+    return f"premium/customcmds/{guild_id}.json"
+
+
+def _ccmds(guild_id: int) -> dict:
+    """Blocking: run in a thread."""
+    data = _premium_read(_ccmd_path(guild_id), {"cmds": {}})
+    cmds = data.get("cmds", {})
+    return cmds if isinstance(cmds, dict) else {}
+
+
+customcmd_group = app_commands.Group(
+    name="customcmd", description="Your server's own !commands (premium)."
+)
+
+
+@customcmd_group.command(
+    name="add", description="Create a custom !command (mods, premium)."
+)
+@_manage_server()
+async def customcmd_add_cmd(
+    interaction: discord.Interaction, name: str, response: str
+):
+    guild = await _premium_guild_or_note(interaction)
+    if guild is None:
+        return
+    clean = name.strip().lower().lstrip("!")
+    if not _CCMD_NAME_RE.match(clean) or clean in _CCMD_RESERVED:
+        await interaction.response.send_message(
+            "Names must be 1–32 characters: letters, numbers, dashes.",
+            ephemeral=True,
+        )
+        return
+    if len(response) > _CCMD_MAX_RESPONSE:
+        await interaction.response.send_message(
+            f"Keep the response under {_CCMD_MAX_RESPONSE} characters.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        cmds = await asyncio.to_thread(_ccmds, guild.id)
+        if clean not in cmds and len(cmds) >= _CCMD_MAX:
+            await interaction.followup.send(
+                f"This server already has {_CCMD_MAX} custom commands. "
+                "Remove one first.",
+                ephemeral=True,
+            )
+            return
+        cmds[clean] = response.strip()
+        await asyncio.to_thread(_premium_write, _ccmd_path(guild.id), {"cmds": cmds})
+        await interaction.followup.send(
+            f"Created `!{clean}`.", ephemeral=True
+        )
+    except (RuntimeError, urllib.error.HTTPError) as e:
+        await interaction.followup.send(f"Couldn't save that: {e}", ephemeral=True)
+
+
+@customcmd_group.command(
+    name="remove", description="Delete a custom !command (mods, premium)."
+)
+@_manage_server()
+async def customcmd_remove_cmd(interaction: discord.Interaction, name: str):
+    guild = await _premium_guild_or_note(interaction)
+    if guild is None:
+        return
+    clean = name.strip().lower().lstrip("!")
+    await interaction.response.defer(ephemeral=True)
+    try:
+        cmds = await asyncio.to_thread(_ccmds, guild.id)
+        if clean not in cmds:
+            await interaction.followup.send(
+                f"No custom command `!{clean}` here.", ephemeral=True
+            )
+            return
+        del cmds[clean]
+        await asyncio.to_thread(_premium_write, _ccmd_path(guild.id), {"cmds": cmds})
+        await interaction.followup.send(f"Deleted `!{clean}`.", ephemeral=True)
+    except (RuntimeError, urllib.error.HTTPError) as e:
+        await interaction.followup.send(f"Couldn't save that: {e}", ephemeral=True)
+
+
+@customcmd_group.command(
+    name="list", description="Show this server's custom !commands (mods, premium)."
+)
+@_manage_server()
+async def customcmd_list_cmd(interaction: discord.Interaction):
+    guild = await _premium_guild_or_note(interaction)
+    if guild is None:
+        return
+    await interaction.response.defer(ephemeral=True)
+    cmds = await asyncio.to_thread(_ccmds, guild.id)
+    if not cmds:
+        await interaction.followup.send(
+            "No custom commands yet. Use /customcmd add to make one.",
+            ephemeral=True,
+        )
+        return
+    lines = [f"!{n}" for n in sorted(cmds)[:25]]
+    await interaction.followup.send(" ".join(lines), ephemeral=True)
+
+
+bot.tree.add_command(customcmd_group)
+
+
+async def _handle_customcmd(message: discord.Message) -> bool:
+    """Fire a premium custom !command. Returns True when one fired."""
+    # Parse the !prefix first: this runs on every guild message, and the
+    # premium lookup below hits the network (or at least a thread hop), so
+    # bail out before it when no command was even attempted.
+    text = (message.content or "").strip()
+    if not text.startswith("!"):
+        return False
+    rest = text[1:].split(None, 1)
+    if not rest:
+        return False
+    name = rest[0].lower().rstrip("!?,.")
+    if not _CCMD_NAME_RE.match(name):
+        return False
+    guild = message.guild
+    if guild is None or not await _guild_is_premium(guild):
+        return False
+    cmds = await asyncio.to_thread(_ccmds, guild.id)
+    response = cmds.get(name)
+    if not response:
+        return False
+    try:
+        await message.reply(str(response)[:2000])
+    except discord.HTTPException:
+        pass
+    return True
+
+
+# --- Premium: scheduled announcements ------------------------------------------
+# Premium servers can schedule announcements. A 60s loop posts due ones;
+# overdue one-timers (< 6h late) still post, repeats advance.
+
+_SCHED_MAX = 20
+_SCHED_MAX_MSG = 1000
+_SCHED_OVERDUE_GRACE_S = 6 * 3600
+# In-run idempotency for scheduled announcements: (guild_id, schedule id,
+# original fire time) triples already delivered. Stops a schedule being
+# re-sent every 60s when the GitHub write that would clear it keeps failing.
+_sched_delivered: set[tuple[int, int, object]] = set()
+_WHEN_REL_RE = re.compile(r"^in\s+(\d+)\s*([mhdw])$", re.IGNORECASE)
+_WHEN_AT_RE = re.compile(r"^at\s+(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$")
+
+
+def _parse_when(text: str, now: datetime) -> datetime | None:
+    """Parse 'in 30m/2h/3d/1w' or 'at YYYY-MM-DD HH:MM' (UTC)."""
+    s = text.strip()
+    m = _WHEN_REL_RE.match(s)
+    if m:
+        n, unit = int(m.group(1)), m.group(2).lower()
+        delta = {
+            "m": timedelta(minutes=n),
+            "h": timedelta(hours=n),
+            "d": timedelta(days=n),
+            "w": timedelta(weeks=n),
+        }[unit]
+        return now + delta
+    m = _WHEN_AT_RE.match(s)
+    if m:
+        try:
+            return datetime(*map(int, m.groups()), tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+def _sched_path(guild_id: int) -> str:
+    return f"premium/schedules/{guild_id}.json"
+
+
+def _schedules(guild_id: int) -> list:
+    """Blocking: run in a thread."""
+    data = _premium_read(_sched_path(guild_id), {"schedules": []})
+    scheds = data.get("schedules", [])
+    return scheds if isinstance(scheds, list) else []
+
+
+def _due_schedules(
+    scheds: list, now: datetime
+) -> tuple[list, list]:
+    """Split into (due_to_post, keep). Repeats advance in place."""
+    due, keep = [], []
+    for s in scheds:
+        if not isinstance(s, dict):
+            continue
+        try:
+            at = datetime.fromisoformat(s["at"])
+        except (ValueError, KeyError, TypeError):
+            continue  # malformed: drop
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        if at > now:
+            keep.append(s)
+            continue
+        due.append(s)
+        repeat = s.get("repeat", "none")
+        if repeat == "daily":
+            # Advance past now so missed occurrences are skipped instead of
+            # each firing a minute apart on the following runner passes.
+            while at <= now:
+                at += timedelta(days=1)
+            s["at"] = at.isoformat()
+            keep.append(s)
+        elif repeat == "weekly":
+            while at <= now:
+                at += timedelta(weeks=1)
+            s["at"] = at.isoformat()
+            keep.append(s)
+        # one-time: dropped
+    return due, keep
+
+
+schedule_group = app_commands.Group(
+    name="schedule", description="Scheduled announcements (premium)."
+)
+
+
+@schedule_group.command(
+    name="add", description="Schedule an announcement (mods, premium)."
+)
+@_manage_server()
+@app_commands.describe(
+    channel="Where to post it.",
+    message="What to say.",
+    when="'in 30m', 'in 2h', 'in 3d', 'in 1w', or 'at 2026-09-20 15:00' (UTC).",
+    repeat="Just once, or repeat it.",
+)
+@app_commands.choices(
+    repeat=[
+        app_commands.Choice(name="Just once", value="none"),
+        app_commands.Choice(name="Daily", value="daily"),
+        app_commands.Choice(name="Weekly", value="weekly"),
+    ]
+)
+async def schedule_add_cmd(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    message: str,
+    when: str,
+    repeat: app_commands.Choice[str],
+):
+    guild = await _premium_guild_or_note(interaction)
+    if guild is None:
+        return
+    now = datetime.now(timezone.utc)
+    at = _parse_when(when, now)
+    if at is None:
+        await interaction.response.send_message(
+            "I didn't understand the time. Try `in 30m`, `in 2h`, `in 3d`, "
+            "`in 1w`, or `at 2026-09-20 15:00` (UTC).",
+            ephemeral=True,
+        )
+        return
+    if at <= now:
+        await interaction.response.send_message(
+            "That time is in the past.", ephemeral=True
+        )
+        return
+    if len(message) > _SCHED_MAX_MSG:
+        await interaction.response.send_message(
+            f"Keep the message under {_SCHED_MAX_MSG} characters.", ephemeral=True
+        )
+        return
+    me = guild.me
+    if me is None or not channel.permissions_for(me).send_messages:
+        await interaction.response.send_message(
+            f"I can't send messages in {channel.mention}.", ephemeral=True
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        scheds = await asyncio.to_thread(_schedules, guild.id)
+        if len(scheds) >= _SCHED_MAX:
+            await interaction.followup.send(
+                f"This server already has {_SCHED_MAX} scheduled announcements. "
+                "Remove one first.",
+                ephemeral=True,
+            )
+            return
+        new_id = max([s.get("id", 0) for s in scheds if isinstance(s, dict)] + [0]) + 1
+        scheds.append(
+            {
+                "id": new_id,
+                "channel_id": channel.id,
+                "message": message.strip(),
+                "at": at.isoformat(),
+                "repeat": repeat.value,
+            }
+        )
+        await asyncio.to_thread(
+            _premium_write, _sched_path(guild.id), {"schedules": scheds}
+        )
+        stamp = int(at.timestamp())
+        await interaction.followup.send(
+            f"Scheduled for <t:{stamp}:F> in {channel.mention} "
+            f"({repeat.name.lower()}).",
+            ephemeral=True,
+        )
+    except (RuntimeError, urllib.error.HTTPError) as e:
+        await interaction.followup.send(f"Couldn't save that: {e}", ephemeral=True)
+
+
+@schedule_group.command(
+    name="remove", description="Delete a scheduled announcement (mods, premium)."
+)
+@_manage_server()
+async def schedule_remove_cmd(interaction: discord.Interaction, id: int):
+    guild = await _premium_guild_or_note(interaction)
+    if guild is None:
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        scheds = await asyncio.to_thread(_schedules, guild.id)
+        kept = [s for s in scheds if not (isinstance(s, dict) and s.get("id") == id)]
+        if len(kept) == len(scheds):
+            await interaction.followup.send(f"No scheduled post #{id} here.", ephemeral=True)
+            return
+        await asyncio.to_thread(
+            _premium_write, _sched_path(guild.id), {"schedules": kept}
+        )
+        await interaction.followup.send(f"Deleted scheduled post #{id}.", ephemeral=True)
+    except (RuntimeError, urllib.error.HTTPError) as e:
+        await interaction.followup.send(f"Couldn't save that: {e}", ephemeral=True)
+
+
+@schedule_group.command(
+    name="list", description="Show scheduled announcements (mods, premium)."
+)
+@_manage_server()
+async def schedule_list_cmd(interaction: discord.Interaction):
+    guild = await _premium_guild_or_note(interaction)
+    if guild is None:
+        return
+    await interaction.response.defer(ephemeral=True)
+    scheds = await asyncio.to_thread(_schedules, guild.id)
+    if not scheds:
+        await interaction.followup.send(
+            "Nothing scheduled. Use /schedule add to plan one.", ephemeral=True
+        )
+        return
+    lines = []
+    for s in sorted(
+        [x for x in scheds if isinstance(x, dict)], key=lambda x: str(x.get("at", ""))
+    )[:15]:
+        try:
+            stamp = int(datetime.fromisoformat(s["at"]).timestamp())
+            when = f"<t:{stamp}:R>"
+        except (ValueError, KeyError, TypeError):
+            when = "?"
+        msg = str(s.get("message", ""))[:60]
+        lines.append(f"#{s.get('id')} {when} ({s.get('repeat', 'none')}) <#{s.get('channel_id')}>: {msg}")
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
+bot.tree.add_command(schedule_group)
+
+
+@tasks.loop(seconds=60)
+async def _schedule_runner():
+    now = datetime.now(timezone.utc)
+    for guild in bot.guilds:
+        try:
+            if not await _guild_is_premium(guild):
+                continue
+            scheds = await asyncio.to_thread(_schedules, guild.id)
+        except Exception:  # noqa: BLE001
+            continue
+        # Snapshot each schedule's original fire time: _due_schedules advances
+        # repeats in place, and the (guild, id, original at) triple identifies
+        # one delivery occurrence for the idempotency set below.
+        orig_at = {id(s): s.get("at") for s in scheds if isinstance(s, dict)}
+        due, keep = _due_schedules(scheds, now)
+        for s in due:
+            key = (guild.id, s.get("id"), orig_at.get(id(s)))
+            if key in _sched_delivered:
+                continue  # sent already; the GitHub write failed last pass
+            try:
+                at = datetime.fromisoformat(s["at"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+            overdue = (now - at).total_seconds()
+            channel = guild.get_channel(s.get("channel_id"))
+            if channel is not None and overdue < _SCHED_OVERDUE_GRACE_S:
+                try:
+                    await channel.send(str(s.get("message", ""))[:2000])
+                except (discord.HTTPException, discord.Forbidden):
+                    continue
+                _sched_delivered.add(key)
+        if due:
+            try:
+                await asyncio.to_thread(
+                    _premium_write, _sched_path(guild.id), {"schedules": keep}
+                )
+            except Exception:  # noqa: BLE001
+                # Write failed: the remote file still shows these as due, but
+                # _sched_delivered stops them being re-sent every 60 seconds.
+                # The write is retried on the next pass.
+                continue
+            for s in due:
+                _sched_delivered.discard(
+                    (guild.id, s.get("id"), orig_at.get(id(s)))
+                )
+
+
+@_schedule_runner.before_loop
+async def _schedule_runner_before():
+    await bot.wait_until_ready()
 
 
 if __name__ == "__main__":
