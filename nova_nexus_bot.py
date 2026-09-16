@@ -1225,6 +1225,19 @@ _SWEAR_COOLDOWN_S = 60.0
 _DM_GREETINGS = {"hi", "hello", "hey", "yo", "sup", "hiya", "howdy", "greetings"}
 _DM_MORNING = ("good morning", "good evening", "good afternoon")
 
+# Words that signal a DM question is about Nova Nexus 3 or the server.
+# The FAQ matcher uses broad substring keywords ("role", "when", "game",
+# ...), so it is only consulted when the message shows Nova context —
+# otherwise a general question like "what is the role of mitochondria?"
+# would get the server-roles answer instead of the Wikipedia fallback.
+_NOVA_CONTEXT_WORDS = {
+    "nova", "nexus", "engine", "server", "discord",
+    "ticket", "moderator", "appeal", "holo", "beyblade",
+    "valtriac", "avior", "wicked", "unreal", "ue5",
+    "studio", "trailer", "cinematic", "fleet", "overlord",
+    "frontier", "github", "repo", "ultron",
+}
+
 
 _WIKI_SEARCH_URL = (
     "https://en.wikipedia.org/w/api.php?action=query&list=search"
@@ -1302,11 +1315,13 @@ async def _handle_dm(message: discord.Message):
                 "about the Nova Nexus 3 engine, the server, or anything else."
             )
             return
-        answer = answer_question(text)
+        answer = None
+        if words & _NOVA_CONTEXT_WORDS:
+            answer = answer_question(text)
         if answer:
             await message.channel.send(answer)
             return
-        wiki = _wikipedia_answer(text)
+        wiki = await asyncio.to_thread(_wikipedia_answer, text)
         if wiki:
             await message.channel.send(wiki)
             return
