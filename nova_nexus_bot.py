@@ -1218,9 +1218,11 @@ async def on_app_command_error(
         pass
 
 
-# No-swearing rule: if a message contains profanity, the bot replies
-# "Please do not swear." One warning per user per minute so it can't
-# be used to spam the channel.
+# No-swearing rule: repeated profanity escalates from a warning to a ban.
+# Strike 1: "Please do not swear." Strike 2: final warning that another
+# offense means a ban. Strike 3: the user is banned. Warning texts are
+# sent at most once per user per minute so they can't be used to spam
+# the channel.
 _PROFANITY = re.compile(
     r"\b("
     r"fuck(?:er|ing|ed|s)?|motherfucker|"
@@ -1240,6 +1242,53 @@ _PROFANITY = re.compile(
 )
 _swear_warned_at: dict[int, float] = {}
 _SWEAR_COOLDOWN_S = 60.0
+# (guild_id, user_id) -> profanity strike count for the current bot run.
+_swear_strikes: dict[tuple[int, int], int] = {}
+_SWEAR_BAN_REASON = "Repeated swearing after warnings from the Nova Nexus 3 bot."
+
+
+async def _handle_swear(message: discord.Message) -> None:
+    """Delete a profane message and escalate the author's strike count.
+
+    Strike 1 warns, strike 2 warns that the next offense means a ban,
+    and strike 3 bans the user from the server.
+    """
+    try:
+        await message.delete()
+    except discord.HTTPException:
+        pass
+    key = (message.guild.id, message.author.id)
+    strikes = _swear_strikes.get(key, 0) + 1
+    _swear_strikes[key] = strikes
+    try:
+        if strikes >= 3:
+            try:
+                await message.guild.ban(message.author, reason=_SWEAR_BAN_REASON)
+            except (discord.Forbidden, discord.HTTPException):
+                await message.channel.send(
+                    f"{message.author.mention} would be banned for repeated "
+                    "swearing, but I don't have permission to ban them."
+                )
+                return
+            _swear_strikes[key] = 0
+            await message.channel.send(
+                f"{message.author.mention} has been banned for repeated swearing."
+            )
+            return
+        now = time.monotonic()
+        last = _swear_warned_at.get(message.author.id, 0.0)
+        if now - last < _SWEAR_COOLDOWN_S:
+            return
+        _swear_warned_at[message.author.id] = now
+        if strikes == 1:
+            await message.channel.send("Please do not swear.")
+        else:
+            await message.channel.send(
+                f"{message.author.mention}, if you swear again, "
+                "you will be banned."
+            )
+    except discord.HTTPException:
+        pass
 
 _DM_GREETINGS = {"hi", "hello", "hey", "yo", "sup", "hiya", "howdy", "greetings"}
 _DM_MORNING = ("good morning", "good evening", "good afternoon")
@@ -1319,18 +1368,7 @@ async def on_message(message: discord.Message):
     if message.guild is None:
         await _handle_dm(message)
     elif _PROFANITY.search(message.content or ""):
-        try:
-            await message.delete()
-        except discord.HTTPException:
-            pass
-        now = time.monotonic()
-        last = _swear_warned_at.get(message.author.id, 0.0)
-        if now - last >= _SWEAR_COOLDOWN_S:
-            _swear_warned_at[message.author.id] = now
-            try:
-                await message.channel.send("Please do not swear.")
-            except discord.HTTPException:
-                pass
+        await _handle_swear(message)
     elif _is_ticket_channel(message.channel):
         await _handle_ticket_message(message)
     elif await _handle_customcmd(message):
