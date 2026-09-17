@@ -47,6 +47,7 @@ _NOVA_AI_SYSTEM = (
     "Stay kind and patient even when someone is frustrated — never lecture, "
     "scold, accuse anyone of being rude, or tell them to change the topic. "
     "Just help with what they're asking. "
+    "Follow the server's community rules yourself: no swearing, stay respectful. "
     "If someone reports a problem, help them solve it step by step."
 )
 
@@ -1427,7 +1428,10 @@ async def _handle_swear(message: discord.Message) -> None:
 
     Strike 1 warns, strike 2 warns that the next offense means a ban,
     and strike 3 bans the user from the server.
+    The server owner is exempt: the bot never polices the owner.
     """
+    if message.guild is not None and message.author.id == message.guild.owner_id:
+        return
     try:
         await message.delete()
     except discord.HTTPException:
