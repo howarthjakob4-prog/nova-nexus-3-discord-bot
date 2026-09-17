@@ -45,3 +45,9 @@ python -u nova_nexus_bot.py
 - Only one copy of the bot can be online per token. Stop other copies first.
 - Welcome messages need **Server Members Intent** enabled in the Discord
   developer portal, plus `intents.members = True` in `nova_nexus_bot.py`.
+
+## Code review
+
+Pull requests are automatically reviewed by the Codex bot
+(`chatgpt-codex-connector[bot]`). It only reviews code — it doesn't write
+code, run the bot, or talk in Discord.
