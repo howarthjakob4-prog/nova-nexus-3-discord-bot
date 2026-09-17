@@ -37,7 +37,7 @@ intents.message_content = True
 # "Novaengine 3" environment; without it the bot keeps its current
 # knowledge-base answers.
 _GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
-_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
 _NOVA_AI_SYSTEM = (
     "You are the Nova Nexus 3 Engine community bot, a friendly helper in the "
