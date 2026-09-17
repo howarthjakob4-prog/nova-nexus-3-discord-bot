@@ -1,0 +1,60 @@
+name: Bot Notifier
+
+# One-shot notifier: posts a status embed AS the Nova Nexus 3 Engine bot.
+# Triggered via the GitHub API (workflow_dispatch) by the status monitor,
+# so outage/maintenance alerts come from the real bot instead of a webhook.
+# Inputs are passed as env vars to avoid any quoting issues.
+on:
+  workflow_dispatch:
+    inputs:
+      channel_id:
+        description: "Discord channel ID to post the embed in"
+        required: true
+      title:
+        description: "Embed title"
+        required: true
+      description:
+        description: "Embed description"
+        required: true
+      color:
+        description: "Embed color as a decimal integer (e.g. 15548997 red, 5763719 green)"
+        required: false
+        default: "3447003"
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: Novaengine 3
+    env:
+      DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+      N3_CHANNEL_ID: ${{ inputs.channel_id }}
+      N3_TITLE: ${{ inputs.title }}
+      N3_DESCRIPTION: ${{ inputs.description }}
+      N3_COLOR: ${{ inputs.color }}
+    steps:
+      - name: Post embed as the bot
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, urllib.request
+          payload = {
+              "embeds": [
+                  {
+                      "title": os.environ["N3_TITLE"],
+                      "description": os.environ["N3_DESCRIPTION"],
+                      "color": int(os.environ.get("N3_COLOR") or 3447003),
+                  }
+              ]
+          }
+          req = urllib.request.Request(
+              "https://discord.com/api/v10/channels/" + os.environ["N3_CHANNEL_ID"] + "/messages",
+              data=json.dumps(payload).encode(),
+              headers={
+                  "Authorization": "Bot " + os.environ["DISCORD_TOKEN"],
+                  "Content-Type": "application/json",
+                  "User-Agent": "NovaNexus3-Notifier",
+              },
+          )
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              print("posted as bot, http", resp.status)
+          PYEOF
