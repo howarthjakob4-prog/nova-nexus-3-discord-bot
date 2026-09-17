@@ -1542,6 +1542,11 @@ async def _handle_dm(message: discord.Message):
     text = (message.content or "").strip()
     if not text:
         return
+    now = time.monotonic()
+    last = _chat_answered_at.get(message.author.id, 0.0)
+    if now - last < _CHAT_COOLDOWN_S:
+        return
+    _chat_answered_at[message.author.id] = now
     name = message.author.display_name
     lowered = text.lower()
     words = set(re.findall(r"[a-z']+", lowered))
@@ -1589,16 +1594,16 @@ _chat_answered_at: dict[int, float] = {}
 
 def _talking_to_bot(message: discord.Message) -> bool:
     """True when the message mentions the bot or replies to it."""
-    if bot.user is None:
+    me = bot.user
+    if me is None:
         return False
-    if bot.user in message.mentions:
+    # Compare IDs: in guilds, mentions hold Member objects while bot.user is a
+    # ClientUser, and Member != ClientUser even for the same user.
+    if any(m.id == me.id for m in message.mentions):
         return True
     ref = message.reference
-    return (
-        ref is not None
-        and isinstance(ref.resolved, discord.Message)
-        and ref.resolved.author == bot.user
-    )
+    resolved_author = getattr(getattr(ref, "resolved", None), "author", None)
+    return getattr(resolved_author, "id", None) == me.id
 
 
 async def _handle_chat(message: discord.Message) -> None:
@@ -1611,17 +1616,22 @@ async def _handle_chat(message: discord.Message) -> None:
     if not content:
         await message.reply("Hey — ask me anything.")
         return
-    ai_answer = await asyncio.to_thread(_ai_answer, content)
-    if ai_answer:
-        await message.reply(ai_answer)
-        return
+    # Premium guilds: their paid, moderator-curated FAQ wins over the generic
+    # model answer. Everyone else gets Gemini first.
     kb_answer = None
     if message.guild is not None and await _guild_is_premium(message.guild):
         try:
             kb_answer = await asyncio.to_thread(_kb_answer, message.guild.id, content)
-        except Exception:  # noqa: BLE001 -- transient GitHub failure: engine FAQ fallback
+        except Exception:  # noqa: BLE001 -- transient GitHub failure: fall through
             kb_answer = None
-    await message.reply(kb_answer or answer_question(content) or _ASK_FALLBACK)
+    if kb_answer:
+        await message.reply(kb_answer)
+        return
+    ai_answer = await asyncio.to_thread(_ai_answer, content)
+    if ai_answer:
+        await message.reply(ai_answer)
+        return
+    await message.reply(answer_question(content) or _ASK_FALLBACK)
 
 
 _AI_CLASSIFY_SYSTEM = (
@@ -1673,6 +1683,18 @@ async def _handle_ambient(message: discord.Message) -> None:
         is_question = await asyncio.to_thread(_ai_is_question, content)
         if not is_question:
             return  # None (no key / error) or False: stay silent
+    kb_answer = None
+    if message.guild is not None and await _guild_is_premium(message.guild):
+        try:
+            kb_answer = await asyncio.to_thread(_kb_answer, message.guild.id, content)
+        except Exception:  # noqa: BLE001 -- transient GitHub failure: skip premium KB
+            kb_answer = None
+    if kb_answer:
+        try:
+            await message.reply(kb_answer)
+        except discord.HTTPException:
+            pass
+        return
     ai_answer = await asyncio.to_thread(_ai_answer, content)
     if ai_answer:
         try:
@@ -1680,13 +1702,7 @@ async def _handle_ambient(message: discord.Message) -> None:
         except discord.HTTPException:
             pass
         return
-    kb_answer = None
-    if message.guild is not None and await _guild_is_premium(message.guild):
-        try:
-            kb_answer = await asyncio.to_thread(_kb_answer, message.guild.id, content)
-        except Exception:  # noqa: BLE001 -- transient GitHub failure: skip premium KB
-            kb_answer = None
-    wiki = kb_answer or answer_question(content)
+    wiki = answer_question(content)
     if not wiki:
         wiki = await asyncio.to_thread(_wikipedia_answer, content)
     if wiki:
