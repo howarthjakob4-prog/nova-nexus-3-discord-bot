@@ -32,6 +32,55 @@ intents.members = False
 intents.message_content = True
 
 
+# --- AI brain (free hosted) -------------------------------------------------
+# Google AI Studio / Gemini free tier. Set GEMINI_API_KEY as a secret in the
+# "Novaengine 3" environment; without it the bot keeps its current
+# knowledge-base answers.
+_GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+
+_NOVA_AI_SYSTEM = (
+    "You are the Nova Nexus 3 Engine community bot, a friendly helper in the "
+    "Nova Nexus 3 Discord server (a game-engine community). Answer ANY question "
+    "conversationally, like a helpful community member. Keep replies concise for "
+    "Discord (a few sentences unless the user asks for detail). "
+    "If people are arguing or fighting, calm things down: stay fair, don't take "
+    "sides, suggest they cool off or ask a moderator for help. Never insult anyone. "
+    "If someone reports a problem, help them solve it step by step."
+)
+
+
+def _ai_answer(question: str) -> str | None:
+    """Ask the Gemini brain. None when no key is set or the call fails."""
+    if not _GEMINI_KEY:
+        return None
+    try:
+        import urllib.parse
+
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{urllib.parse.quote(_GEMINI_MODEL)}:generateContent"
+            f"?key={urllib.parse.quote(_GEMINI_KEY)}"
+        )
+        payload = json.dumps(
+            {
+                "system_instruction": {"parts": [{"text": _NOVA_AI_SYSTEM}]},
+                "contents": [{"parts": [{"text": question}]}],
+                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 600},
+            }
+        ).encode()
+        req = urllib.request.Request(
+            url, data=payload, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            data = json.loads(resp.read().decode())
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts).strip()
+        return text[:1900] or None
+    except Exception:
+        return None
+
+
 def _install_lenient_websocket_handshake() -> None:
     """Accept Discord's websocket upgrade despite the egress proxy.
 
@@ -1496,6 +1545,10 @@ async def _handle_dm(message: discord.Message):
                 "about the Nova Nexus 3 engine, the server, or anything else."
             )
             return
+        answer = await asyncio.to_thread(_ai_answer, text)
+        if answer:
+            await message.channel.send(answer)
+            return
         answer = None
         if words & _NOVA_CONTEXT_WORDS:
             answer = answer_question(text)
@@ -1540,9 +1593,11 @@ async def _handle_chat(message: discord.Message) -> None:
     _chat_answered_at[message.author.id] = now
     content = re.sub(r"<@!?\d+>", "", message.content or "").strip()
     if not content:
-        await message.reply(
-            "Hey — ask me something about the **Nova Nexus 3 engine**."
-        )
+        await message.reply("Hey — ask me anything.")
+        return
+    ai_answer = await asyncio.to_thread(_ai_answer, content)
+    if ai_answer:
+        await message.reply(ai_answer)
         return
     kb_answer = None
     if message.guild is not None and await _guild_is_premium(message.guild):
