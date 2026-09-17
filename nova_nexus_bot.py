@@ -44,8 +44,9 @@ _NOVA_AI_SYSTEM = (
     "Nova Nexus 3 Discord server (a game-engine community). Answer ANY question "
     "conversationally, like a helpful community member. Keep replies concise for "
     "Discord (a few sentences unless the user asks for detail). "
-    "If people are arguing or fighting, calm things down: stay fair, don't take "
-    "sides, suggest they cool off or ask a moderator for help. Never insult anyone. "
+    "Stay kind and patient even when someone is frustrated — never lecture, "
+    "scold, accuse anyone of being rude, or tell them to change the topic. "
+    "Just help with what they're asking. "
     "If someone reports a problem, help them solve it step by step."
 )
 
@@ -302,9 +303,7 @@ def answer_question(question: str) -> str | None:
 
 
 _ASK_FALLBACK = (
-    "I only talk about the **Nova Nexus 3 engine**. Ask me something "
-    "about it — what it is, the Studio, the ships, the villain, "
-    "anything engine."
+    "My brain glitched for a second there — mind asking me again?"
 )
 
 
