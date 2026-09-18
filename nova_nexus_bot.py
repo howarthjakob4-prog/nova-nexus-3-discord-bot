@@ -638,13 +638,9 @@ async def help_cmd(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
-        name="/announce setup",
-        value="Create the announcements channel for engine updates (mods only).",
-        inline=False,
-    )
-    embed.add_field(
         name="Owner panel",
         value=(
+            "/announce setup — create the announcements channel for engine updates.\n"
             "/shutdown <reason> — shut the bot down.\n"
             "These commands are for the bot owner only."
         ),
@@ -959,6 +955,15 @@ def _manage_server():
     async def predicate(interaction: discord.Interaction) -> bool:
         perms = interaction.user.guild_permissions if interaction.guild else None
         return bool(perms and perms.manage_guild)
+
+    return app_commands.check(predicate)
+
+
+def _owner_only():
+    """Gate for the owner panel: only the bot owner may use these commands."""
+
+    async def predicate(interaction: discord.Interaction) -> bool:
+        return await bot.is_owner(interaction.user)
 
     return app_commands.check(predicate)
 
@@ -1477,9 +1482,9 @@ announce_group = app_commands.Group(
 
 
 @announce_group.command(
-    name="setup", description="Create the announcements channel (mods only)."
+    name="setup", description="Create the announcements channel (owner only)."
 )
-@_manage_server()
+@_owner_only()
 async def announce_setup_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
