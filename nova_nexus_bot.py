@@ -61,7 +61,11 @@ def _gemini_generate(
     timeout: int = 25,
     max_chars: int = 1900,
 ) -> str | None:
-    """Raw Gemini text generation. None when no key is set or the call fails."""
+    """Raw Gemini text generation. None when no key is set or the call fails.
+
+    Tries twice: a single transient API hiccup retries immediately instead
+    of surfacing as a brain-glitch to the user.
+    """
     if not _GEMINI_KEY:
         return None
     try:
@@ -85,8 +89,14 @@ def _gemini_generate(
         req = urllib.request.Request(
             url, data=payload, headers={"Content-Type": "application/json"}
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode())
+        for _attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode())
+                break
+            except Exception:
+                if _attempt == 1:
+                    return None
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(p.get("text", "") for p in parts).strip()
         return text[:max_chars] or None
@@ -96,7 +106,175 @@ def _gemini_generate(
 
 def _ai_answer(question: str) -> str | None:
     """Ask the Gemini brain. None when no key is set or the call fails."""
-    return _gemini_generate(_NOVA_AI_SYSTEM, question)
+    text, _used_tools = _ai_answer_meta(question)
+    return text
+
+
+def _ai_answer_meta(question: str) -> tuple[str | None, bool]:
+    """Ask the Gemini brain, letting it read the engine GitHub repo when the
+    question is about the code.
+
+    Returns (answer, used_github_tools). None answer when no key is set or
+    the call fails.
+    """
+    if not _GEMINI_KEY:
+        return None, False
+    return _gemini_tool_loop(_NOVA_AI_SYSTEM_WITH_GITHUB, question)
+
+
+_NOVA_AI_SYSTEM_WITH_GITHUB = (
+    _NOVA_AI_SYSTEM
+    + " You have tools to search code and read files in the Nova-Nexus-3 "
+    + "engine GitHub repo (howarthjakob4-prog/Nova-Nexus-3). When someone asks "
+    + "about the engine's code, files, or how something is implemented, use "
+    + "the tools to check the actual repo before answering — don't guess at "
+    + "file contents."
+)
+
+_GITHUB_TOOL_DECLS = [
+    {
+        "name": "github_search_code",
+        "description": (
+            "Search code in the Nova-Nexus-3 engine GitHub repo "
+            "(howarthjakob4-prog/Nova-Nexus-3). Returns matching file paths. "
+            "Use this first when a question is about the engine's code, then "
+            "read the most relevant files."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Code search keywords, e.g. 'swear filter strikes' or 'ticket setup'.",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "github_read_file",
+        "description": (
+            "Read a file from the Nova-Nexus-3 engine GitHub repo "
+            "(howarthjakob4-prog/Nova-Nexus-3). Returns the file's text "
+            "(truncated). Path is relative to the repo root, e.g. "
+            "'DISCORD_RULES.md' or 'studio/editor.html'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Repo-relative file path to read.",
+                }
+            },
+            "required": ["path"],
+        },
+    },
+]
+
+_GITHUB_TOOL_ROUNDS = 3
+
+
+def _run_github_tool(name: str, args: dict) -> dict:
+    """Execute one brain-requested GitHub tool call. Read-only."""
+    if name == "github_search_code":
+        import urllib.parse
+
+        query = str(args.get("query", ""))[:200].strip()
+        if not query:
+            return {"matches": []}
+        token = _RULES_TOKEN
+        if not token:
+            return {"error": "GitHub access is not configured."}
+        q = urllib.parse.quote(f"repo:howarthjakob4-prog/Nova-Nexus-3 {query}")
+        data = _github_api("GET", f"/search/code?q={q}&per_page=5", token)
+        items = data.get("items", []) if isinstance(data, dict) else []
+        return {"matches": [{"path": it.get("path", "")} for it in items[:5]]}
+    if name == "github_read_file":
+        path = str(args.get("path", "")).strip().lstrip("/")[:300]
+        if not path or ".." in path.split("/"):
+            return {"error": "invalid path"}
+        content = _fetch_github_file(path)
+        if not content:
+            return {"path": path, "error": "file not found or unreadable"}
+        return {"path": path, "content": content[:6000]}
+    return {"error": f"unknown tool: {name}"}
+
+
+def _gemini_tool_loop(
+    system_prompt: str,
+    user_text: str,
+    *,
+    temperature: float = 0.7,
+    max_tokens: int = 600,
+    timeout: int = 25,
+    max_chars: int = 1900,
+) -> str | None:
+    """Gemini chat with GitHub tools. The model may call the tools a few
+    times to look at the repo before giving its final answer.
+
+    Returns (answer_text_or_None, used_github_tools)."""
+    import urllib.parse
+
+    base_url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{urllib.parse.quote(_GEMINI_MODEL)}:generateContent"
+        f"?key={urllib.parse.quote(_GEMINI_KEY)}"
+    )
+
+    def _post(contents: list) -> dict | None:
+        payload = json.dumps(
+            {
+                "system_instruction": {"parts": [{"text": system_prompt}]},
+                "contents": contents,
+                "tools": [{"functionDeclarations": _GITHUB_TOOL_DECLS}],
+                "generationConfig": {
+                    "temperature": temperature,
+                    "maxOutputTokens": max_tokens,
+                },
+            }
+        ).encode()
+        req = urllib.request.Request(
+            base_url, data=payload, headers={"Content-Type": "application/json"}
+        )
+        for _attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return json.loads(resp.read().decode())
+            except Exception:
+                if _attempt == 1:
+                    return None
+        return None
+
+    contents: list = [{"role": "user", "parts": [{"text": user_text}]}]
+    used_tools = False
+    for _ in range(_GITHUB_TOOL_ROUNDS):
+        data = _post(contents)
+        if not data:
+            return None, used_tools
+        try:
+            parts = data["candidates"][0]["content"]["parts"]
+        except (KeyError, IndexError, TypeError):
+            return None, used_tools
+        calls = [p["functionCall"] for p in parts if "functionCall" in p]
+        text = "".join(p.get("text", "") for p in parts).strip()
+        if not calls:
+            return (text[:max_chars] or None), used_tools
+        used_tools = True
+        contents.append({"role": "model", "parts": parts})
+        results = []
+        for call in calls:
+            name = call.get("name", "")
+            args = call.get("args", {}) or {}
+            try:
+                outcome = _run_github_tool(name, args)
+            except Exception:  # noqa: BLE001 -- tool failure: tell the model
+                outcome = {"error": "tool failed"}
+            results.append(
+                {"functionResponse": {"name": name, "response": outcome}}
+            )
+        contents.append({"role": "user", "parts": results})
+    return None, used_tools
 
 
 def _install_lenient_websocket_handshake() -> None:
@@ -1486,55 +1664,6 @@ _NOVA_CONTEXT_WORDS = {
 }
 
 
-_WIKI_SEARCH_URL = (
-    "https://en.wikipedia.org/w/api.php?action=query&list=search"
-    "&srlimit=1&format=json&srsearch="
-)
-_WIKI_PAGE_URL = (
-    "https://en.wikipedia.org/w/api.php?action=query&prop=extracts"
-    "&exintro&explaintext&format=json&titles="
-)
-
-
-def _wikipedia_answer(query: str) -> str | None:
-    """One-paragraph Wikipedia answer for general questions.
-
-    Free, no API key. Returns None when nothing useful is found.
-    """
-    from urllib.parse import quote
-
-    try:
-        search_req = urllib.request.Request(
-            _WIKI_SEARCH_URL + quote(query),
-            headers={"User-Agent": "NovaNexus3Bot/1.0"},
-        )
-        with urllib.request.urlopen(search_req, timeout=8) as resp:
-            data = json.load(resp)
-        results = data.get("query", {}).get("search", [])
-        if not results:
-            return None
-        title = results[0]["title"]
-        page_req = urllib.request.Request(
-            _WIKI_PAGE_URL + quote(title),
-            headers={"User-Agent": "NovaNexus3Bot/1.0"},
-        )
-        with urllib.request.urlopen(page_req, timeout=8) as resp:
-            data = json.load(resp)
-        pages = data.get("query", {}).get("pages", {})
-        for page in pages.values():
-            extract = (page.get("extract") or "").strip()
-            if not extract or "may refer to:" in extract[:300]:
-                continue
-            sentences = re.split(r"(?<=[.!?])\s+", extract)
-            short = " ".join(sentences[:3]).strip()
-            if len(short) > 600:
-                short = short[:597].rstrip() + "..."
-            return f"According to Wikipedia — **{title}**: {short}"
-        return None
-    except Exception:
-        return None
-
-
 async def _handle_dm(message: discord.Message):
     """Conversational replies in direct messages.
 
@@ -1579,10 +1708,6 @@ async def _handle_dm(message: discord.Message):
         if answer:
             await message.channel.send(answer)
             return
-        wiki = await asyncio.to_thread(_wikipedia_answer, text)
-        if wiki:
-            await message.channel.send(wiki)
-            return
         await message.channel.send(
             "I couldn't find an answer for that. "
             "Try asking about the Nova Nexus 3 engine, or /help in the server."
@@ -1609,6 +1734,58 @@ def _talking_to_bot(message: discord.Message) -> bool:
     return getattr(resolved_author, "id", None) == me.id
 
 
+_CODE_REQUEST_HINTS = (
+    "code",
+    "script",
+    "github",
+    "repo",
+    "source code",
+    "snippet",
+    "function",
+)
+
+
+def _looks_like_code_request(text: str) -> bool:
+    """Heuristic: is the user asking for code from the repo?"""
+    t = text.lower()
+    return any(h in t for h in _CODE_REQUEST_HINTS)
+
+
+async def _deliver_brain_answer(
+    message: discord.Message,
+    answer: str,
+    used_tools: bool,
+    question: str,
+) -> None:
+    """Send a brain answer, keeping code out of public channels.
+
+    When the question is a code request — or the brain pulled from GitHub to
+    answer it — the answer goes by DM and the channel only gets a pointer.
+    Code never appears in public. Plain answers reply in the channel.
+    """
+    code_private = used_tools or _looks_like_code_request(question)
+    if not code_private or message.guild is None:
+        try:
+            await message.reply(answer)
+        except discord.HTTPException:
+            pass
+        return
+    try:
+        await message.author.send(answer)
+    except (discord.Forbidden, discord.HTTPException):
+        try:
+            await message.reply(
+                "I couldn't DM you — open your DMs and ask me again."
+            )
+        except discord.HTTPException:
+            pass
+        return
+    try:
+        await message.reply("Check your DMs — I sent that privately.")
+    except discord.HTTPException:
+        pass
+
+
 async def _handle_chat(message: discord.Message) -> None:
     now = time.monotonic()
     last = _chat_answered_at.get(message.author.id, 0.0)
@@ -1630,9 +1807,9 @@ async def _handle_chat(message: discord.Message) -> None:
     if kb_answer:
         await message.reply(kb_answer)
         return
-    ai_answer = await asyncio.to_thread(_ai_answer, content)
+    ai_answer, used_tools = await asyncio.to_thread(_ai_answer_meta, content)
     if ai_answer:
-        await message.reply(ai_answer)
+        await _deliver_brain_answer(message, ai_answer, used_tools, content)
         return
     await message.reply(answer_question(content) or _ASK_FALLBACK)
 
@@ -1668,9 +1845,10 @@ async def _handle_ambient(message: discord.Message) -> None:
     """Answer questions posted in chat even when the bot isn't mentioned.
 
     Ordinary messages are classified by Gemini: questions and requests for
-    help get a conversational answer (Gemini first, then the knowledge base
-    and Wikipedia fallbacks); everything else is met with silence. Uses the
-    same 5-second per-user cooldown as direct chat so it can't spam.
+    help get a conversational answer (Gemini first, then the knowledge
+    base); everything else is met with silence. Code answers go by DM, never
+    in public. Uses the same 5-second per-user cooldown as direct chat so it
+    can't spam.
     """
     content = (message.content or "").strip()
     if not content or content.startswith("!"):
@@ -1698,19 +1876,14 @@ async def _handle_ambient(message: discord.Message) -> None:
         except discord.HTTPException:
             pass
         return
-    ai_answer = await asyncio.to_thread(_ai_answer, content)
+    ai_answer, used_tools = await asyncio.to_thread(_ai_answer_meta, content)
     if ai_answer:
-        try:
-            await message.reply(ai_answer)
-        except discord.HTTPException:
-            pass
+        await _deliver_brain_answer(message, ai_answer, used_tools, content)
         return
-    wiki = answer_question(content)
-    if not wiki:
-        wiki = await asyncio.to_thread(_wikipedia_answer, content)
-    if wiki:
+    faq_answer = answer_question(content)
+    if faq_answer:
         try:
-            await message.reply(wiki)
+            await message.reply(faq_answer)
         except discord.HTTPException:
             pass
     # Otherwise: stay completely silent.
