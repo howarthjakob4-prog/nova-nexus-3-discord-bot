@@ -29,6 +29,17 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v4
 
+      - name: Check for shutdown marker
+        id: shutdown_check
+        run: |
+          if [ -f SHUTDOWN ]; then
+            echo "marker=true" >> "$GITHUB_OUTPUT"
+            echo "SHUTDOWN marker present — the bot was shut down and must stay off."
+            cat SHUTDOWN
+          else
+            echo "marker=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -38,6 +49,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run the bot
+        if: steps.shutdown_check.outputs.marker != 'true'
         run: python -u nova_nexus_bot.py
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
