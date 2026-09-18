@@ -771,6 +771,62 @@ async def timeout_cmd(
     await _mod_action(interaction, member, reason, "timeout", minutes=minutes)
 
 
+def _set_shutdown_marker(reason: str) -> bool:
+    """Write the SHUTDOWN marker so scheduled bot runs stay off.
+
+    Returns True when the marker was written. Uses RULES_TOKEN (repo scope).
+    """
+    import base64 as _b64
+
+    token = os.environ.get("RULES_TOKEN")
+    if not token:
+        return False
+    repo = f"/repos/{_BOT_REPO_OWNER}/{_BOT_REPO}"
+    content = _b64.b64encode(
+        (
+            "The bot was shut down and must stay off until this file is deleted.\n"
+            f"Reason: {reason}\n\n"
+            "To bring the bot back: delete this file, then run the\n"
+            '"Nova Nexus 3 Engine Bot" workflow again.\n'
+        ).encode()
+    ).decode()
+    payload = {"message": f"Bot shutdown ({reason})", "content": content}
+    try:
+        existing = _github_api("GET", repo + "/contents/SHUTDOWN", token)
+        if isinstance(existing, dict) and existing.get("sha"):
+            payload["sha"] = existing["sha"]
+    except Exception:
+        pass
+    try:
+        _github_api("PUT", repo + "/contents/SHUTDOWN", token, payload)
+        return True
+    except Exception:
+        return False
+
+
+@bot.tree.command(name="shutdown", description="Shut the bot down (bot owner only).")
+async def shutdown_cmd(interaction: discord.Interaction):
+    if not await bot.is_owner(interaction.user):
+        await interaction.response.send_message(
+            "Only the bot owner can do that.", ephemeral=True
+        )
+        return
+    marker_ok = await asyncio.to_thread(_set_shutdown_marker, "owner /shutdown command")
+    if marker_ok:
+        note = (
+            "Shutting down and staying off. To bring me back, delete the "
+            "SHUTDOWN file in the bot repo, then run the bot workflow again."
+        )
+    else:
+        note = (
+            "Shutting down, but I couldn't leave the stay-off marker — the "
+            "5-hour schedule may restart me. Run the Emergency stop workflow "
+            "if I come back."
+        )
+    await interaction.response.send_message(note, ephemeral=True)
+    await bot.close()
+
+
 async def _mod_target(
     guild: discord.Guild, member: discord.Member
 ) -> tuple[discord.Member | None, str | None]:
