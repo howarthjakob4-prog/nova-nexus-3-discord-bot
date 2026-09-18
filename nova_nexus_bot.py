@@ -634,12 +634,17 @@ async def help_cmd(interaction: discord.Interaction):
     )
     embed.add_field(
         name="/ticket setup",
-        value="Create the ticket center (mods only).",
+        value="Create the ticket center (owner only).",
         inline=False,
     )
     embed.add_field(
         name="/announce setup",
-        value="Create the announcements channel for engine updates (mods only).",
+        value="Create the announcements channel for engine updates (owner only).",
+        inline=False,
+    )
+    embed.add_field(
+        name="Owner panel",
+        value="Setup commands are for the bot owner only.",
         inline=False,
     )
     embed.add_field(
@@ -955,6 +960,15 @@ def _manage_server():
     return app_commands.check(predicate)
 
 
+def _owner_only():
+    """Gate for the owner panel: only the bot owner may use these commands."""
+
+    async def predicate(interaction: discord.Interaction) -> bool:
+        return await bot.is_owner(interaction.user)
+
+    return app_commands.check(predicate)
+
+
 def _ticket_staff_roles(guild: discord.Guild) -> list:
     named = [r for r in guild.roles if r.name.lower() in _TICKET_STAFF_ROLE_NAMES]
     # Also cover staff whose powers come from role permissions rather than
@@ -1228,8 +1242,8 @@ bot.setup_hook = _ticket_setup_hook
 ticket_group = app_commands.Group(name="ticket", description="Support tickets.")
 
 
-@ticket_group.command(name="setup", description="Create the ticket center (mods only).")
-@_manage_server()
+@ticket_group.command(name="setup", description="Create the ticket center (owner only).")
+@_owner_only()
 async def ticket_setup_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
@@ -1469,9 +1483,9 @@ announce_group = app_commands.Group(
 
 
 @announce_group.command(
-    name="setup", description="Create the announcements channel (mods only)."
+    name="setup", description="Create the announcements channel (owner only)."
 )
-@_manage_server()
+@_owner_only()
 async def announce_setup_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
