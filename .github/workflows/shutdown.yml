@@ -9,29 +9,54 @@ on:
         default: "Emergency stop"
 
 # One-tap shutoff switch for the Nova Nexus 3 Engine bot.
-# Cancels every in-progress run of the bot workflow, even if the
-# bot itself is unresponsive (a Discord /shutdown can't help then).
+# Cancels every in-progress AND queued run of the bot workflow, then leaves a
+# SHUTDOWN marker so the 5-hour schedule doesn't restart the bot on its own.
+# Works even if the bot itself is unresponsive (a Discord /shutdown can't help then).
 # Only people with write access to this repo can run it.
+#
+# To bring the bot back: delete the SHUTDOWN file in the repo, then run the
+# "Nova Nexus 3 Engine Bot" workflow again.
 
 jobs:
   stop:
     runs-on: ubuntu-latest
     permissions:
       actions: write
+      contents: write
     steps:
-      - name: Cancel in-progress bot runs
+      - name: Cancel in-progress and queued bot runs
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           REASON: ${{ inputs.reason }}
         run: |
           echo "Reason: $REASON"
-          ids=$(gh run list --workflow bot.yml --status in_progress --json databaseId -q '.[].databaseId')
-          if [ -z "$ids" ]; then
-            echo "No in-progress bot runs to stop."
-            exit 0
-          fi
-          for id in $ids; do
-            echo "Cancelling bot run $id"
-            gh run cancel "$id"
+          # Two passes: cancelling the active run releases the singleton
+          # concurrency group, which can start a queued run between passes.
+          for pass in 1 2; do
+            ids=$(gh run list --workflow bot.yml --json databaseId,status -q '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId')
+            if [ -z "$ids" ]; then
+              echo "Pass $pass: no in-progress or queued bot runs."
+            else
+              for id in $ids; do
+                echo "Pass $pass: cancelling bot run $id"
+                gh run cancel "$id"
+              done
+            fi
+            sleep 10
           done
+
+      - name: Leave stay-off marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          content=$(printf 'The bot was shut down and must stay off until this file is deleted.\nReason: %s\n\nTo bring the bot back: delete this file, then run the "Nova Nexus 3 Engine Bot" workflow again.\n' "$REASON" | base64 -w0)
+          sha=$(gh api "repos/$GH_REPO/contents/SHUTDOWN" -q '.sha' 2>/dev/null || true)
+          if [ -n "$sha" ]; then
+            gh api -X PUT "repos/$GH_REPO/contents/SHUTDOWN" -f message="Emergency stop ($REASON)" -f content="$content" -f sha="$sha" --silent
+          else
+            gh api -X PUT "repos/$GH_REPO/contents/SHUTDOWN" -f message="Emergency stop ($REASON)" -f content="$content" --silent || echo "Stay-off marker already present."
+          fi
           echo "Done."
