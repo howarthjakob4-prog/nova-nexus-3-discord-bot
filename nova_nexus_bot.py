@@ -61,7 +61,11 @@ def _gemini_generate(
     timeout: int = 25,
     max_chars: int = 1900,
 ) -> str | None:
-    """Raw Gemini text generation. None when no key is set or the call fails."""
+    """Raw Gemini text generation. None when no key is set or the call fails.
+
+    Tries twice: a single transient API hiccup retries immediately instead
+    of surfacing as a brain-glitch to the user.
+    """
     if not _GEMINI_KEY:
         return None
     try:
@@ -85,8 +89,14 @@ def _gemini_generate(
         req = urllib.request.Request(
             url, data=payload, headers={"Content-Type": "application/json"}
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode())
+        for _attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode())
+                break
+            except Exception:
+                if _attempt == 1:
+                    return None
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(p.get("text", "") for p in parts).strip()
         return text[:max_chars] or None
@@ -1486,55 +1496,6 @@ _NOVA_CONTEXT_WORDS = {
 }
 
 
-_WIKI_SEARCH_URL = (
-    "https://en.wikipedia.org/w/api.php?action=query&list=search"
-    "&srlimit=1&format=json&srsearch="
-)
-_WIKI_PAGE_URL = (
-    "https://en.wikipedia.org/w/api.php?action=query&prop=extracts"
-    "&exintro&explaintext&format=json&titles="
-)
-
-
-def _wikipedia_answer(query: str) -> str | None:
-    """One-paragraph Wikipedia answer for general questions.
-
-    Free, no API key. Returns None when nothing useful is found.
-    """
-    from urllib.parse import quote
-
-    try:
-        search_req = urllib.request.Request(
-            _WIKI_SEARCH_URL + quote(query),
-            headers={"User-Agent": "NovaNexus3Bot/1.0"},
-        )
-        with urllib.request.urlopen(search_req, timeout=8) as resp:
-            data = json.load(resp)
-        results = data.get("query", {}).get("search", [])
-        if not results:
-            return None
-        title = results[0]["title"]
-        page_req = urllib.request.Request(
-            _WIKI_PAGE_URL + quote(title),
-            headers={"User-Agent": "NovaNexus3Bot/1.0"},
-        )
-        with urllib.request.urlopen(page_req, timeout=8) as resp:
-            data = json.load(resp)
-        pages = data.get("query", {}).get("pages", {})
-        for page in pages.values():
-            extract = (page.get("extract") or "").strip()
-            if not extract or "may refer to:" in extract[:300]:
-                continue
-            sentences = re.split(r"(?<=[.!?])\s+", extract)
-            short = " ".join(sentences[:3]).strip()
-            if len(short) > 600:
-                short = short[:597].rstrip() + "..."
-            return f"According to Wikipedia — **{title}**: {short}"
-        return None
-    except Exception:
-        return None
-
-
 async def _handle_dm(message: discord.Message):
     """Conversational replies in direct messages.
 
@@ -1578,10 +1539,6 @@ async def _handle_dm(message: discord.Message):
             answer = answer_question(text)
         if answer:
             await message.channel.send(answer)
-            return
-        wiki = await asyncio.to_thread(_wikipedia_answer, text)
-        if wiki:
-            await message.channel.send(wiki)
             return
         await message.channel.send(
             "I couldn't find an answer for that. "
@@ -1705,12 +1662,10 @@ async def _handle_ambient(message: discord.Message) -> None:
         except discord.HTTPException:
             pass
         return
-    wiki = answer_question(content)
-    if not wiki:
-        wiki = await asyncio.to_thread(_wikipedia_answer, content)
-    if wiki:
+    faq_answer = answer_question(content)
+    if faq_answer:
         try:
-            await message.reply(wiki)
+            await message.reply(faq_answer)
         except discord.HTTPException:
             pass
     # Otherwise: stay completely silent.
