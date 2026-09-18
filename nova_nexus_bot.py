@@ -968,11 +968,6 @@ def _owner_only():
     return app_commands.check(predicate)
 
 
-def _role_members_all_bots(role: discord.Role) -> bool:
-    members = role.members
-    return bool(members) and all(m.bot for m in members)
-
-
 def _ticket_staff_roles(guild: discord.Guild) -> list:
     named = [r for r in guild.roles if r.name.lower() in _TICKET_STAFF_ROLE_NAMES]
     # Also cover staff whose powers come from role permissions rather than
@@ -988,13 +983,7 @@ def _ticket_staff_roles(guild: discord.Guild) -> list:
             or r.permissions.ban_members
         )
     ]
-    # Never page bot roles as staff: an offline bot with admin perms can't
-    # answer tickets, and pinging it just spams a dead bot.
-    return [
-        r
-        for r in named + extra
-        if not r.is_bot_managed() and not _role_members_all_bots(r)
-    ]
+    return named + extra
 
 
 def _is_ticket_staff(member: discord.Member) -> bool:
