@@ -805,17 +805,20 @@ def _set_shutdown_marker(reason: str) -> bool:
 
 
 @bot.tree.command(name="shutdown", description="Shut the bot down (bot owner only).")
-async def shutdown_cmd(interaction: discord.Interaction):
+@app_commands.describe(reason="Why are you shutting the bot down?")
+async def shutdown_cmd(interaction: discord.Interaction, reason: str):
     if not await bot.is_owner(interaction.user):
         await interaction.response.send_message(
             "Only the bot owner can do that.", ephemeral=True
         )
         return
-    marker_ok = await asyncio.to_thread(_set_shutdown_marker, "owner /shutdown command")
+    reason = reason.strip() or "no reason given"
+    marker_ok = await asyncio.to_thread(_set_shutdown_marker, f"owner /shutdown: {reason}")
     if marker_ok:
         note = (
-            "Shutting down and staying off. To bring me back, delete the "
-            "SHUTDOWN file in the bot repo, then run the bot workflow again."
+            f"Shutting down and staying off. Reason recorded: {reason}. "
+            "To bring me back, delete the SHUTDOWN file in the bot repo, "
+            "then run the bot workflow again."
         )
     else:
         note = (

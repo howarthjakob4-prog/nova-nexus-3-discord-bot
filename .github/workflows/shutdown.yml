@@ -5,8 +5,7 @@ on:
     inputs:
       reason:
         description: "Why are you stopping the bot?"
-        required: false
-        default: "Emergency stop"
+        required: true
 
 # One-tap shutoff switch for the Nova Nexus 3 Engine bot.
 # Cancels every in-progress AND queued run of the bot workflow, then leaves a
