@@ -6,11 +6,13 @@ for welcome messages. Invite with the `bot` and `applications.commands`
 scopes so slash commands show up.
 """
 import asyncio
+import http.client
 import io
 import json
 import os
 import re
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -52,8 +54,32 @@ _NOVA_AI_SYSTEM = (
 )
 
 
-def _gemini_generate(
-    system_prompt: str,
+_RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+
+
+def _retry_wait_s(exc: BaseException) -> float | None:
+    """Seconds to wait before retrying a Gemini call.
+
+    Returns None when the failure is not transient — e.g. an invalid key or
+    model, a malformed request, or exhausted quota — so we don't repeat a
+    request that is guaranteed to fail again.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code not in _RETRYABLE_STATUS:
+            return None
+        try:
+            wait = float(exc.headers.get("Retry-After", 0) or 0)
+        except (TypeError, ValueError):
+            wait = 0.0
+        return max(0.0, min(wait, 10.0))
+    if isinstance(
+        exc, (urllib.error.URLError, TimeoutError, http.client.HTTPException)
+    ):
+        return 0.0
+    return None
+
+
+def _gemini_generate(    system_prompt: str,
     user_text: str,
     *,
     temperature: float = 0.7,
@@ -63,8 +89,9 @@ def _gemini_generate(
 ) -> str | None:
     """Raw Gemini text generation. None when no key is set or the call fails.
 
-    Tries twice: a single transient API hiccup retries immediately instead
-    of surfacing as a brain-glitch to the user.
+    Retries once, but only on transient failures (dropped connections,
+    timeouts, rate limits, server errors) — a bad key or bad request fails
+    fast instead of doubling doomed traffic.
     """
     if not _GEMINI_KEY:
         return None
@@ -94,9 +121,12 @@ def _gemini_generate(
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     data = json.loads(resp.read().decode())
                 break
-            except Exception:
-                if _attempt == 1:
+            except Exception as exc:  # noqa: BLE001 -- network/API failure
+                wait = _retry_wait_s(exc)
+                if wait is None or _attempt == 1:
                     return None
+                if wait:
+                    time.sleep(wait)
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(p.get("text", "") for p in parts).strip()
         return text[:max_chars] or None
@@ -241,9 +271,12 @@ def _gemini_tool_loop(
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     return json.loads(resp.read().decode())
-            except Exception:
-                if _attempt == 1:
+            except Exception as exc:  # noqa: BLE001 -- network/API failure
+                wait = _retry_wait_s(exc)
+                if wait is None or _attempt == 1:
                     return None
+                if wait:
+                    time.sleep(wait)
         return None
 
     contents: list = [{"role": "user", "parts": [{"text": user_text}]}]
@@ -274,7 +307,18 @@ def _gemini_tool_loop(
                 {"functionResponse": {"name": name, "response": outcome}}
             )
         contents.append({"role": "user", "parts": results})
-    return None, used_tools
+    # The loop only falls through when every round ended with tool calls, so
+    # the last tool results were appended but never answered. Give the model
+    # one final call to turn them into an answer instead of discarding them.
+    data = _post(contents)
+    if not data:
+        return None, used_tools
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+    except (KeyError, IndexError, TypeError):
+        return None, used_tools
+    text = "".join(p.get("text", "") for p in parts).strip()
+    return (text[:max_chars] or None), used_tools
 
 
 def _install_lenient_websocket_handshake() -> None:
@@ -1734,21 +1778,19 @@ def _talking_to_bot(message: discord.Message) -> bool:
     return getattr(resolved_author, "id", None) == me.id
 
 
-_CODE_REQUEST_HINTS = (
-    "code",
-    "script",
-    "github",
-    "repo",
-    "source code",
-    "snippet",
-    "function",
+_CODE_REQUEST_RE = re.compile(
+    r"\b(?:code|script|github|repo|source code|snippet|function)\b"
 )
 
 
 def _looks_like_code_request(text: str) -> bool:
     """Heuristic: is the user asking for code from the repo?"""
-    t = text.lower()
-    return any(h in t for h in _CODE_REQUEST_HINTS)
+    return _CODE_REQUEST_RE.search(text.lower()) is not None
+
+
+def _answer_has_code(text: str) -> bool:
+    """Did the generated answer itself come back with a code block?"""
+    return "```" in text
 
 
 async def _deliver_brain_answer(
@@ -1762,8 +1804,15 @@ async def _deliver_brain_answer(
     When the question is a code request — or the brain pulled from GitHub to
     answer it — the answer goes by DM and the channel only gets a pointer.
     Code never appears in public. Plain answers reply in the channel.
+
+    The privacy call looks at the generated answer too, not just the
+    question: the model can return a code block without touching any tool.
     """
-    code_private = used_tools or _looks_like_code_request(question)
+    code_private = (
+        used_tools
+        or _looks_like_code_request(question)
+        or _answer_has_code(answer)
+    )
     if not code_private or message.guild is None:
         try:
             await message.reply(answer)
