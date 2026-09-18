@@ -727,6 +727,20 @@ async def timeout_cmd(
     await _mod_action(interaction, member, reason, "timeout", minutes=minutes)
 
 
+@bot.tree.command(name="shutdown", description="Shut the bot down (bot owner only).")
+async def shutdown_cmd(interaction: discord.Interaction):
+    if not await bot.is_owner(interaction.user):
+        await interaction.response.send_message(
+            "Only the bot owner can do that.", ephemeral=True
+        )
+        return
+    await interaction.response.send_message(
+        "Shutting down now. Start the workflow again when you want me back.",
+        ephemeral=True,
+    )
+    await bot.close()
+
+
 async def _mod_target(
     guild: discord.Guild, member: discord.Member
 ) -> tuple[discord.Member | None, str | None]:

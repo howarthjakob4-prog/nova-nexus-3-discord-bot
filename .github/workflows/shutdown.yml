@@ -1,0 +1,37 @@
+name: Emergency stop
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why are you stopping the bot?"
+        required: false
+        default: "Emergency stop"
+
+# One-tap shutoff switch for the Nova Nexus 3 Engine bot.
+# Cancels every in-progress run of the bot workflow, even if the
+# bot itself is unresponsive (a Discord /shutdown can't help then).
+# Only people with write access to this repo can run it.
+
+jobs:
+  stop:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel in-progress bot runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          echo "Reason: $REASON"
+          ids=$(gh run list --workflow bot.yml --status in_progress --json databaseId -q '.[].databaseId')
+          if [ -z "$ids" ]; then
+            echo "No in-progress bot runs to stop."
+            exit 0
+          fi
+          for id in $ids; do
+            echo "Cancelling bot run $id"
+            gh run cancel "$id"
+          done
+          echo "Done."
