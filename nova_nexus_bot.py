@@ -1634,7 +1634,13 @@ async def _handle_chat(message: discord.Message) -> None:
     if ai_answer:
         await message.reply(ai_answer)
         return
-    await message.reply(answer_question(content) or _ASK_FALLBACK)
+    fallback = answer_question(content)
+    if not fallback:
+        # Same safety net as ambient chat and DMs: when Gemini is down and
+        # the engine FAQ has nothing, answer from Wikipedia instead of
+        # glitching out on the user.
+        fallback = await asyncio.to_thread(_wikipedia_answer, content)
+    await message.reply(fallback or _ASK_FALLBACK)
 
 
 _AI_CLASSIFY_SYSTEM = (
