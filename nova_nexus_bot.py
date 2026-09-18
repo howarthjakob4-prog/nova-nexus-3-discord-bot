@@ -1307,7 +1307,7 @@ async def ticket_setup_cmd(interaction: discord.Interaction):
 bot.tree.add_command(ticket_group)
 
 # --- Engine announcements -------------------------------------------------
-# /announce setup (mods) creates an #announcements channel plus an
+# /announce setup (owner only) creates an #announcements channel plus an
 # "Engine Updates" webhook in it, then wires the Nova-Nexus-3 repo to post
 # there on every push to main: it stores the webhook URL as the
 # DISCORD_ANNOUNCE_WEBHOOK Actions secret and opens a PR adding
