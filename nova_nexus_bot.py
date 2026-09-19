@@ -767,7 +767,11 @@ def _fetch_rules() -> str:
 @bot.tree.command(name="links", description="Where to find the Nova Nexus 3 project.")
 async def links_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(
-        "Nova Nexus 3 lives on GitHub (private repo — ask the owner for access)."
+        "**Nova Engine Studios** / Nova Nexus 3:\n"
+        "• Engine repo: https://github.com/howarthjakob4-prog/Nova-Nexus-3\n"
+        "• This Discord bot: https://github.com/howarthjakob4-prog/nova-nexus-3-discord-bot\n"
+        "• Releases: https://github.com/howarthjakob4-prog/Nova-Nexus-3/releases\n\n"
+        "Portal download + Access tiers live in the studio site under `studio/` in the engine repo."
     )
 
 
