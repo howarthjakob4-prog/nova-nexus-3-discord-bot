@@ -621,7 +621,9 @@ async def on_member_join(member: discord.Member):
         title="Welcome — Nova Nexus Engine Three",
         description=(
             f"{member.mention}, welcome to the Nova Nexus 3 Discord.\n\n"
-            "I'm **Nova Nexus Engine Three Bot**. Try `/help` or ask me about the engine.\n"
+            "I'm **Nova Nexus Engine Three Bot**. Nova Nexus 3 is a **toolbox** — "
+            "bring your own assets and projects.\n"
+            "Try `/help`, `/engine`, or ask me anything.\n"
             "Build clearly. Govern openly. Ship together."
         ),
         color=0x14B8A6,
