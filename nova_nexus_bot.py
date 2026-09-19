@@ -27,10 +27,10 @@ intents = discord.Intents.default()
 # NOTE: Server Members Intent is off until it's enabled in the developer
 # portal (Bot page -> Privileged Gateway Intents). Flip the toggle there
 # and set this True to enable welcome messages.
-intents.members = False
-# NOTE: Message Content Intent must be ON in the developer portal
-# (Bot page -> Privileged Gateway Intents) for the no-swearing filter
-# to see message text. Flip the toggle there.
+# Server Members Intent must be ON in the Discord developer portal
+# (Bot page -> Privileged Gateway Intents) for welcome messages.
+intents.members = True
+# Message Content Intent must be ON for the no-swearing filter.
 intents.message_content = True
 
 
@@ -594,6 +594,22 @@ async def on_ready():
         _schedule_runner.start()
 
 
+# Discord-only Access / Creator / Studio role names (not website auth).
+_ACCESS_ROLE_NAMES = {
+    "access": ("Access", "N3 Access"),
+    "creator": ("Creator", "N3 Creator"),
+    "studio": ("Studio", "N3 Studio"),
+}
+
+
+def _find_tier_role(guild: discord.Guild, tier: str) -> discord.Role | None:
+    names = {n.lower() for n in _ACCESS_ROLE_NAMES.get(tier, ())}
+    for role in guild.roles:
+        if role.name.lower() in names:
+            return role
+    return None
+
+
 @bot.event
 async def on_member_join(member: discord.Member):
     channel = discord.utils.get(member.guild.text_channels, name="welcome") or (
@@ -602,14 +618,15 @@ async def on_member_join(member: discord.Member):
     if channel is None:
         return
     embed = discord.Embed(
-        title="Welcome to the Nova Nexus 3 Engine Community",
+        title="Welcome — Nova Nexus Engine Three",
         description=(
-            f"{member.mention}, glad you made it.\n\n"
+            f"{member.mention}, welcome to the Nova Nexus 3 Discord.\n\n"
+            "I'm **Nova Nexus Engine Three Bot**. Try `/help` or ask me about the engine.\n"
             "Build clearly. Govern openly. Ship together."
         ),
         color=0x14B8A6,
     )
-    embed.set_footer(text="Type /help to see what I can do.")
+    embed.set_footer(text="Nova Engine Studios · Discord-only")
     try:
         await channel.send(embed=embed)
     except discord.Forbidden:
@@ -647,6 +664,15 @@ async def help_cmd(interaction: discord.Interaction):
             "/announce setup — create the announcements channel for engine updates.\n"
             "/shutdown <reason> — shut the bot down.\n"
             "These commands are for the bot owner only."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Access tiers (Discord)",
+        value=(
+            "/access-status — your Access / Creator / Studio roles\n"
+            "/access-setup — create those roles (mods)\n"
+            "/access-grant — grant a tier role (mods)"
         ),
         inline=False,
     )
@@ -1309,6 +1335,96 @@ async def ticket_setup_cmd(interaction: discord.Interaction):
 
 
 bot.tree.add_command(ticket_group)
+
+
+# --- Discord-only Access / Creator / Studio roles (not website) -------------
+@bot.tree.command(
+    name="access-setup",
+    description="Create Access / Creator / Studio roles (mods only).",
+)
+@_manage_server()
+async def access_setup_cmd(interaction: discord.Interaction):
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("Server only.", ephemeral=True)
+        return
+    created = []
+    for tier, names in _ACCESS_ROLE_NAMES.items():
+        if _find_tier_role(guild, tier) is None:
+            role = await guild.create_role(
+                name=names[0],
+                reason="Nova Nexus Engine Three Bot access tiers",
+                mentionable=True,
+            )
+            created.append(role.name)
+    if created:
+        await interaction.response.send_message(
+            "Created roles: " + ", ".join(created), ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "Access / Creator / Studio roles already exist.", ephemeral=True
+        )
+
+
+@bot.tree.command(
+    name="access-grant",
+    description="Grant Access, Creator, or Studio role (mods only).",
+)
+@app_commands.describe(member="Member to grant", tier="access, creator, or studio")
+@app_commands.choices(
+    tier=[
+        app_commands.Choice(name="Access ($1 opener)", value="access"),
+        app_commands.Choice(name="Creator", value="creator"),
+        app_commands.Choice(name="Studio", value="studio"),
+    ]
+)
+@_manage_server()
+async def access_grant_cmd(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    tier: app_commands.Choice[str],
+):
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("Server only.", ephemeral=True)
+        return
+    role = _find_tier_role(guild, tier.value)
+    if role is None:
+        await interaction.response.send_message(
+            "That role is missing — run `/access-setup` first.", ephemeral=True
+        )
+        return
+    await member.add_roles(role, reason=f"Granted {tier.value} by {interaction.user}")
+    await interaction.response.send_message(
+        f"Granted **{role.name}** to {member.mention}.", ephemeral=True
+    )
+
+
+@bot.tree.command(
+    name="access-status",
+    description="Check your Access / Creator / Studio roles.",
+)
+async def access_status_cmd(interaction: discord.Interaction):
+    guild = interaction.guild
+    member = interaction.user
+    if guild is None or not isinstance(member, discord.Member):
+        await interaction.response.send_message("Server only.", ephemeral=True)
+        return
+    held = []
+    for tier in ("access", "creator", "studio"):
+        role = _find_tier_role(guild, tier)
+        if role and role in member.roles:
+            held.append(role.name)
+    if held:
+        await interaction.response.send_message(
+            "Your tiers: " + ", ".join(held), ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "No Access / Creator / Studio roles yet.", ephemeral=True
+        )
+
 
 # --- Engine announcements -------------------------------------------------
 # /announce setup (owner only) creates an #announcements channel plus an
