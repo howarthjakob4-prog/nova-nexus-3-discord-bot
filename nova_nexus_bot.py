@@ -1423,13 +1423,18 @@ async def access_status_cmd(interaction: discord.Interaction):
         role = _find_tier_role(guild, tier)
         if role and role in member.roles:
             held.append(role.name)
+    blurb = (
+        "**Access** ($1 opener) — base Nova Nexus 3.\n"
+        "**Creator / Studio** — new drops and betas.\n"
+        "Discord roles only — not website login."
+    )
     if held:
         await interaction.response.send_message(
-            "Your tiers: " + ", ".join(held), ephemeral=True
+            "Your tiers: " + ", ".join(held) + "\n\n" + blurb, ephemeral=True
         )
     else:
         await interaction.response.send_message(
-            "No Access / Creator / Studio roles yet.", ephemeral=True
+            "No Access / Creator / Studio roles yet.\n\n" + blurb, ephemeral=True
         )
 
 
