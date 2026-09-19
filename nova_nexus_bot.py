@@ -39,7 +39,7 @@ intents.message_content = True
 # "Novaengine 3" environment; without it the bot keeps its current
 # knowledge-base answers.
 _GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
-_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 _NOVA_AI_SYSTEM = (
     "You are the Nova Nexus 3 Engine community bot, a friendly helper in the "
@@ -636,7 +636,7 @@ async def on_member_join(member: discord.Member):
 @bot.tree.command(name="help", description="Show what the Nova Nexus bot can do.")
 async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="Nova Nexus 3 Bot — Commands",
+        title="Nova Nexus Engine Three Bot — Commands",
         color=0x14B8A6,
     )
     embed.add_field(name="/help", value="This list.", inline=False)
@@ -697,9 +697,10 @@ async def help_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="engine", description="What is Nova Nexus 3?")
 async def engine_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(
-        "**Nova Nexus 3** is a game/cinematic engine project — "
-        "built for Windows 11 and macOS, aimed at real-time rendering, "
-        "animation, and cinematic tools.\n\n"
+        "**Nova Nexus 3** is the desktop engine from **Nova Engine Studios** "
+        "for Nova Frontier — Windows 11 + macOS (Apple silicon), real-time "
+        "rendering, animation, fleet/sim systems, and cinematic tools.\n\n"
+        "Web editing is disabled; download the desktop build from the studio portal.\n\n"
         "Build clearly. Govern openly. Ship together."
     )
 
