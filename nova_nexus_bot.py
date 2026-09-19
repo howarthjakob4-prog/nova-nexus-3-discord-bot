@@ -697,10 +697,12 @@ async def help_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="engine", description="What is Nova Nexus 3?")
 async def engine_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(
-        "**Nova Nexus 3** is the desktop engine from **Nova Engine Studios** "
-        "for Nova Frontier — Windows 11 + macOS (Apple silicon), real-time "
-        "rendering, animation, fleet/sim systems, and cinematic tools.\n\n"
-        "Web editing is disabled; download the desktop build from the studio portal.\n\n"
+        "**Nova Nexus 3** is the desktop engine from **Nova Engine Studios** — "
+        "a **toolbox**, not a content dump.\n\n"
+        "Bring your own assets, materials, and projects. Studio production content "
+        "stays with Nova Engine Studios; Epic Unreal source stays private.\n\n"
+        "Windows 11 + macOS (Apple silicon). Web editing is disabled — download "
+        "the desktop build from the studio portal.\n\n"
         "Build clearly. Govern openly. Ship together."
     )
 
