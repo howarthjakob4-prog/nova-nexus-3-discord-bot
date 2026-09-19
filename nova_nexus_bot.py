@@ -23,6 +23,36 @@ from discord import app_commands
 TOKEN = os.environ.get("DISCORD_TOKEN")
 GUILD_ID = os.environ.get("GUILD_ID")  # optional: instant slash-command sync
 
+# --- Safety: panic freeze + rate limits (runaway protection) -----------------
+_PANIC_MODE = False  # when True: no AI chat /ask / ambient; mods+owner still work
+_ASK_MIN_INTERVAL_S = float(os.environ.get("ASK_MIN_INTERVAL_S", "3"))
+_CHAT_MIN_INTERVAL_S = float(os.environ.get("CHAT_MIN_INTERVAL_S", "2"))
+_USER_BURST_LIMIT = int(os.environ.get("USER_BURST_LIMIT", "8"))  # per rolling window
+_USER_BURST_WINDOW_S = float(os.environ.get("USER_BURST_WINDOW_S", "60"))
+_last_ask_at: dict[int, float] = {}
+_last_chat_at: dict[int, float] = {}
+_user_hits: dict[int, list[float]] = {}
+
+
+def _rate_ok(store: dict[int, float], user_id: int, min_interval: float) -> bool:
+    now = time.time()
+    prev = store.get(user_id, 0.0)
+    if now - prev < min_interval:
+        return False
+    store[user_id] = now
+    return True
+
+
+def _burst_ok(user_id: int) -> bool:
+    now = time.time()
+    hits = _user_hits.setdefault(user_id, [])
+    hits[:] = [t for t in hits if now - t < _USER_BURST_WINDOW_S]
+    if len(hits) >= _USER_BURST_LIMIT:
+        return False
+    hits.append(now)
+    return True
+
+
 intents = discord.Intents.default()
 # NOTE: Server Members Intent is off until it's enabled in the developer
 # portal (Bot page -> Privileged Gateway Intents). Flip the toggle there
@@ -665,7 +695,8 @@ async def help_cmd(interaction: discord.Interaction):
         name="Owner panel",
         value=(
             "/announce setup — create the announcements channel for engine updates.\n"
-            "/shutdown <reason> — shut the bot down.\n"
+            "/panic freeze|clear — freeze AI if the bot runs away.\n"
+            "/shutdown <reason> — full shutoff + stay-off marker.\n"
             "These commands are for the bot owner only."
         ),
         inline=False,
@@ -727,6 +758,20 @@ async def toolbox_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name="ask", description="Ask anything about the Nova Nexus 3 engine.")
 async def ask_cmd(interaction: discord.Interaction, question: str):
+    if _PANIC_MODE:
+        await interaction.response.send_message(
+            "Bot is in panic freeze — AI answers are paused. Owner: `/panic clear`.",
+            ephemeral=True,
+        )
+        return
+    if not _burst_ok(interaction.user.id) or not _rate_ok(
+        _last_ask_at, interaction.user.id, _ASK_MIN_INTERVAL_S
+    ):
+        await interaction.response.send_message(
+            "Slow down a bit — rate limit to keep the bot from running away.",
+            ephemeral=True,
+        )
+        return
     answer = None
     if interaction.guild is not None and await _guild_is_premium(interaction.guild):
         try:
@@ -887,6 +932,41 @@ async def shutdown_cmd(interaction: discord.Interaction, reason: str):
         )
     await interaction.response.send_message(note, ephemeral=True)
     await bot.close()
+
+
+@bot.tree.command(
+    name="panic",
+    description="Freeze AI chat/ask (owner). Stops a runaway bot without full shutdown.",
+)
+@app_commands.describe(action="freeze or clear")
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="freeze", value="freeze"),
+        app_commands.Choice(name="clear", value="clear"),
+    ]
+)
+async def panic_cmd(interaction: discord.Interaction, action: app_commands.Choice[str]):
+    global _PANIC_MODE
+    if not await bot.is_owner(interaction.user):
+        await interaction.response.send_message(
+            "Only the bot owner can do that.", ephemeral=True
+        )
+        return
+    if action.value == "freeze":
+        _PANIC_MODE = True
+        await interaction.response.send_message(
+            "PANIC ON — AI chat, `/ask`, and ambient replies are frozen. "
+            "Mod tools and `/shutdown` still work. Use `/panic clear` to resume.",
+            ephemeral=True,
+        )
+        print("[nova-nexus] PANIC MODE ON by owner")
+    else:
+        _PANIC_MODE = False
+        await interaction.response.send_message(
+            "PANIC OFF — AI chat and `/ask` resumed.",
+            ephemeral=True,
+        )
+        print("[nova-nexus] PANIC MODE OFF by owner")
 
 
 async def _mod_target(
@@ -2167,6 +2247,16 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         await bot.process_commands(message)
         return
+    # Panic: still allow swear filter + process_commands; freeze AI chat/DM/ambient/tickets AI
+    if _PANIC_MODE:
+        if message.guild is not None and _PROFANITY.search(message.content or ""):
+            await _handle_swear(message)
+        await bot.process_commands(message)
+        return
+    if not _burst_ok(message.author.id):
+        # Silent drop under burst — avoids spam loops taking over the bot
+        await bot.process_commands(message)
+        return
     if message.guild is None:
         await _handle_dm(message)
     elif _PROFANITY.search(message.content or ""):
@@ -2176,6 +2266,9 @@ async def on_message(message: discord.Message):
     elif await _handle_customcmd(message):
         pass  # a premium custom !command fired
     elif _talking_to_bot(message):
+        if not _rate_ok(_last_chat_at, message.author.id, _CHAT_MIN_INTERVAL_S):
+            await bot.process_commands(message)
+            return
         await _handle_chat(message)
     else:
         await _handle_ambient(message)
