@@ -51,3 +51,21 @@ python -u nova_nexus_bot.py
 Pull requests are automatically reviewed by the Codex bot
 (`chatgpt-codex-connector[bot]`). It only reviews code — it doesn't write
 code, run the bot, or talk in Discord.
+
+
+## Access tiers (Discord-only)
+
+Slash commands (mods for setup/grant):
+
+- `/access-setup` — create Access / Creator / Studio roles
+- `/access-grant` — grant a tier role
+- `/access-status` — check your tiers
+
+These are **Discord server roles only**. They are not wired to the website until the owner asks.
+
+## Privileged intents
+
+In the Discord developer portal → Bot → Privileged Gateway Intents, enable:
+
+- **Server Members Intent** — required for welcome messages
+- **Message Content Intent** — required for the swear filter and chat replies
