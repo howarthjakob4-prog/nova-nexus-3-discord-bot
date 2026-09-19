@@ -155,10 +155,11 @@ def _ai_answer_meta(question: str) -> tuple[str | None, bool]:
 _NOVA_AI_SYSTEM_WITH_GITHUB = (
     _NOVA_AI_SYSTEM
     + " You have tools to search code and read files in the Nova-Nexus-3 "
-    + "engine GitHub repo (howarthjakob4-prog/Nova-Nexus-3). When someone asks "
-    + "about the engine's code, files, or how something is implemented, use "
-    + "the tools to check the actual repo before answering — don't guess at "
-    + "file contents."
+    + "engine GitHub repo (howarthjakob4-prog/Nova-Nexus-3). Use them ONLY "
+    + "when the question is specifically about the engine's source code — "
+    + "a particular file, function, class, or implementation detail. For "
+    + "how-to, install, usage, troubleshooting, and rules questions, answer "
+    + "directly from what you know without touching the tools."
 )
 
 _GITHUB_TOOL_DECLS = [
@@ -252,18 +253,18 @@ def _gemini_tool_loop(
         f"?key={urllib.parse.quote(_GEMINI_KEY)}"
     )
 
-    def _post(contents: list) -> dict | None:
-        payload = json.dumps(
-            {
-                "system_instruction": {"parts": [{"text": system_prompt}]},
-                "contents": contents,
-                "tools": [{"functionDeclarations": _GITHUB_TOOL_DECLS}],
-                "generationConfig": {
-                    "temperature": temperature,
-                    "maxOutputTokens": max_tokens,
-                },
-            }
-        ).encode()
+    def _post(contents: list, *, tools: bool = True) -> dict | None:
+        body: dict = {
+            "system_instruction": {"parts": [{"text": system_prompt}]},
+            "contents": contents,
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_tokens,
+            },
+        }
+        if tools:
+            body["tools"] = [{"functionDeclarations": _GITHUB_TOOL_DECLS}]
+        payload = json.dumps(body).encode()
         req = urllib.request.Request(
             base_url, data=payload, headers={"Content-Type": "application/json"}
         )
@@ -310,7 +311,10 @@ def _gemini_tool_loop(
     # The loop only falls through when every round ended with tool calls, so
     # the last tool results were appended but never answered. Give the model
     # one final call to turn them into an answer instead of discarding them.
-    data = _post(contents)
+    # Tools are off on this last call so the model must answer with text:
+    # another function call here would yield no text and surface as the
+    # "brain glitched" fallback.
+    data = _post(contents, tools=False)
     if not data:
         return None, used_tools
     try:
@@ -1873,18 +1877,20 @@ async def _deliver_brain_answer(
 ) -> None:
     """Send a brain answer, keeping code out of public channels.
 
-    When the question is a code request — or the brain pulled from GitHub to
-    answer it — the answer goes by DM and the channel only gets a pointer.
+    The answer goes by DM only when code is actually involved: the question
+    asks for code, or the answer contains a code block. A GitHub tool lookup
+    whose final answer has no code is delivered in the channel like any other
+    answer — the old rule DM'd on any tool use, which is why plain answers
+    showed up as "Check your DMs" instead of replying in chat.
     Code never appears in public. Plain answers reply in the channel.
 
     The privacy call looks at the generated answer too, not just the
     question: the model can return a code block without touching any tool.
+
+    used_tools is kept in the signature for callers; routing no longer
+    depends on it.
     """
-    code_private = (
-        used_tools
-        or _looks_like_code_request(question)
-        or _answer_has_code(answer)
-    )
+    code_private = _looks_like_code_request(question) or _answer_has_code(answer)
     if not code_private or message.guild is None:
         try:
             await message.reply(answer)
