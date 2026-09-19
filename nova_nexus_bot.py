@@ -642,7 +642,8 @@ async def help_cmd(interaction: discord.Interaction):
         color=0x14B8A6,
     )
     embed.add_field(name="/help", value="This list.", inline=False)
-    embed.add_field(name="/engine", value="What Nova Nexus 3 is.", inline=False)\n    embed.add_field(name="/toolbox", value="BYO assets — toolbox vision.", inline=False)
+    embed.add_field(name="/engine", value="What Nova Nexus 3 is.", inline=False)
+    embed.add_field(name="/toolbox", value="BYO assets — toolbox vision.", inline=False)
     embed.add_field(
         name="/ask <question>",
         value="Ask me anything about the engine.",
