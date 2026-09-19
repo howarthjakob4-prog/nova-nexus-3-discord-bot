@@ -642,7 +642,7 @@ async def help_cmd(interaction: discord.Interaction):
         color=0x14B8A6,
     )
     embed.add_field(name="/help", value="This list.", inline=False)
-    embed.add_field(name="/engine", value="What Nova Nexus 3 is.", inline=False)
+    embed.add_field(name="/engine", value="What Nova Nexus 3 is.", inline=False)\n    embed.add_field(name="/toolbox", value="BYO assets — toolbox vision.", inline=False)
     embed.add_field(
         name="/ask <question>",
         value="Ask me anything about the engine.",
@@ -706,6 +706,21 @@ async def engine_cmd(interaction: discord.Interaction):
         "Windows 11 + macOS (Apple silicon). Web editing is disabled — download "
         "the desktop build from the studio portal.\n\n"
         "Build clearly. Govern openly. Ship together."
+    )
+
+
+
+@bot.tree.command(
+    name="toolbox",
+    description="What Nova Nexus 3 is for (bring your own projects).",
+)
+async def toolbox_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "**Nova Nexus 3** is a public **toolbox** — like UE5 for everyone.\n\n"
+        "• Bring your **own** assets, materials, and projects\n"
+        "• Studio production content stays with Nova Engine Studios\n"
+        "• Epic Unreal source stays private — this is not a UE mirror\n\n"
+        "Try `/engine`, `/links`, or `/ask` for more."
     )
 
 
